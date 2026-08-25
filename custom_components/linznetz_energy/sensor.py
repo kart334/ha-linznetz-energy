@@ -23,6 +23,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             LinzNetzYesterdaySensor(coordinator, entry),
+            LinzNetzYesterdayCostSensor(coordinator, entry),
             LinzNetzLastSyncSensor(coordinator, entry),
         ]
     )
@@ -57,6 +58,24 @@ class LinzNetzYesterdaySensor(_LinzNetzBaseSensor):
     @property
     def native_value(self):
         return self.coordinator.data.get("yesterday_kwh")
+
+
+class LinzNetzYesterdayCostSensor(_LinzNetzBaseSensor):
+    """Yesterday's energy + base-price cost, excluding network fees and levies."""
+
+    _attr_name = "Kosten gestern"
+    _attr_native_unit_of_measurement = "EUR"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+
+    def __init__(self, coordinator: LinzNetzCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_yesterday_cost"
+
+    @property
+    def native_value(self):
+        value = self.coordinator.data.get("yesterday_cost_eur")
+        return round(float(value), 4) if value is not None else None
 
 
 class LinzNetzLastSyncSensor(_LinzNetzBaseSensor):

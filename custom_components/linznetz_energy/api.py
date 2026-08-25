@@ -24,7 +24,6 @@ _TO_RE: Final = re.compile(r"calendarToRegion$", re.IGNORECASE)
 _SELECTED_CLASS_RE: Final = re.compile(r":selectedClass$", re.IGNORECASE)
 _QUARTER_TEXT_RE: Final = re.compile(r"viertelstunden|quarter", re.IGNORECASE)
 _KWH_TEXT_RE: Final = re.compile(r"\bkwh\b|energiemenge", re.IGNORECASE)
-_TABLE_ID_RE: Final = re.compile(r":consumptionsTable$", re.IGNORECASE)
 
 
 class LinzNetzError(Exception):
@@ -65,7 +64,7 @@ class PaginationInfo:
 
 
 class LinzNetzClient:
-    """Very small client around the LINZ NETZ JSF portal."""
+    """Client around the LINZ NETZ JSF/PrimeFaces customer portal."""
 
     def __init__(self, session: ClientSession, username: str, password: str) -> None:
         self._session = session
@@ -153,11 +152,10 @@ class LinzNetzClient:
             self._log_safe_form_diagnostics(soup, None)
             raise LinzNetzParseError("Verbrauchsformular nicht gefunden")
 
-        form_id = form.get("id") or form.get("name")
+        form_id = str(form.get("id") or form.get("name") or "")
         if not form_id:
             self._log_safe_form_diagnostics(soup, form)
             raise LinzNetzParseError("Formular-ID nicht gefunden")
-        form_id = str(form_id)
 
         view_state = form.find("input", attrs={"name": _VIEW_STATE_RE})
         if view_state is None:
@@ -177,14 +175,34 @@ class LinzNetzClient:
             self._log_safe_form_diagnostics(soup, form)
             raise LinzNetzParseError("Auswahl 'Viertelstundenwerte' nicht gefunden")
 
+        # On the live portal the unit selector is rendered only after the
+        # consumption period has been changed to quarter-hour values.
         kwh_field = self._find_choice_field(
             form,
             desired_value="KWH",
             label_re=_KWH_TEXT_RE,
         )
         if kwh_field is None:
-            self._log_safe_form_diagnostics(soup, form)
-            raise LinzNetzParseError("Auswahl 'kWh' nicht gefunden")
+            stage_body = await self._async_apply_choice(
+                form_id=form_id,
+                choice=quarter_field,
+                view_state_name=view_state_name,
+                view_state_value=view_state_value,
+            )
+            view_state_value = (
+                self._extract_partial_view_state(stage_body) or view_state_value
+            )
+            stage_soup = self._partial_response_soup(stage_body)
+            kwh_field = self._find_choice_field(
+                stage_soup,
+                desired_value="KWH",
+                label_re=_KWH_TEXT_RE,
+            )
+            if kwh_field is None:
+                self._log_safe_form_diagnostics(stage_soup, stage_soup)
+                raise LinzNetzParseError(
+                    "Auswahl 'kWh' nach Viertelstunden-Auswahl nicht gefunden"
+                )
 
         from_input = self._find_named_control(form, _FROM_RE)
         to_input = self._find_named_control(form, _TO_RE)
@@ -292,6 +310,52 @@ class LinzNetzClient:
 
         return all_readings[: pagination.row_count]
 
+    async def _async_apply_choice(
+        self,
+        *,
+        form_id: str,
+        choice: ChoiceField,
+        view_state_name: str,
+        view_state_value: str,
+    ) -> str:
+        """Apply a dynamic selectedClass choice and return the partial response."""
+        if not _SELECTED_CLASS_RE.search(choice.name):
+            raise LinzNetzParseError(
+                "Dynamisches selectedClass-Feld für Viertelstundenwerte fehlt"
+            )
+
+        component_id = _SELECTED_CLASS_RE.sub("", choice.name)
+        payload = {
+            "jakarta.faces.partial.ajax": "true",
+            "jakarta.faces.source": component_id,
+            "jakarta.faces.partial.execute": component_id,
+            "jakarta.faces.partial.render": form_id,
+            "jakarta.faces.behavior.event": "valueChange",
+            "jakarta.faces.partial.event": "change",
+            form_id: form_id,
+            choice.name: choice.value,
+            view_state_name: view_state_value,
+        }
+        headers = {
+            "Faces-Request": "partial/ajax",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        result = await self._session.post(
+            PORTAL_URL,
+            data=payload,
+            headers=headers,
+            allow_redirects=True,
+        )
+        result.raise_for_status()
+        return await result.text()
+
+    @staticmethod
+    def _partial_response_soup(body: str) -> BeautifulSoup:
+        """Parse HTML fragments from a JSF partial response."""
+        cdata_blocks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", body, flags=re.DOTALL)
+        html = "\n".join(cdata_blocks) if cdata_blocks else body
+        return BeautifulSoup(html, "html.parser")
+
     @staticmethod
     def _contains_password_form(html: str) -> bool:
         soup = BeautifulSoup(html, "html.parser")
@@ -350,8 +414,6 @@ class LinzNetzClient:
         """Resolve dynamic PrimeFaces/JSF choice controls semantically."""
         desired_lower = desired_value.lower()
 
-        # The real LINZ NETZ request uses dynamic JSF component IDs whose
-        # submitted field names end in :selectedClass. Prefer those controls.
         selected_class_fields = [
             tag
             for tag in form.find_all(["input", "select"])
@@ -362,27 +424,21 @@ class LinzNetzClient:
             if value.lower() == desired_lower and tag.get("name"):
                 return ChoiceField(str(tag.get("name")), desired_value)
 
-        # The period selector may currently contain another Consum* value on the
-        # initial GET. That still identifies the correct dynamic selectedClass
-        # field without relying on the generated j_idt... component IDs.
         if desired_value.startswith("Consum"):
             for tag in selected_class_fields:
                 value = str(tag.get("value") or "")
                 if value.lower().startswith("consum") and tag.get("name"):
                     return ChoiceField(str(tag.get("name")), desired_value)
 
-        # Match selectedClass controls by their surrounding visible component text.
         for tag in selected_class_fields:
             if cls._control_context_matches(tag, form, label_re) and tag.get("name"):
                 return ChoiceField(str(tag.get("name")), desired_value)
 
-        # Direct controls, including hidden inputs and radio buttons.
         for tag in form.find_all(["input", "button"]):
             value = str(tag.get("value") or "")
             if value.lower() == desired_lower and tag.get("name"):
                 return ChoiceField(str(tag.get("name")), desired_value)
 
-        # Native select/option structures.
         for option in form.find_all("option"):
             value = str(option.get("value") or "")
             text = option.get_text(" ", strip=True)
@@ -417,7 +473,7 @@ class LinzNetzClient:
         form: Tag,
         label_re: re.Pattern[str],
     ) -> bool:
-        """Check a few nearby component containers for semantic visible text."""
+        """Check nearby component containers for semantic visible text."""
         ancestor: Tag | None = control
         for _ in range(5):
             parent = ancestor.parent if ancestor is not None else None
@@ -430,7 +486,9 @@ class LinzNetzClient:
         return False
 
     @staticmethod
-    def _choice_from_target(target: Tag | None, desired_value: str) -> ChoiceField | None:
+    def _choice_from_target(
+        target: Tag | None, desired_value: str
+    ) -> ChoiceField | None:
         if target is None:
             return None
         if target.name == "select" and target.get("name"):
@@ -484,7 +542,7 @@ class LinzNetzClient:
 
     @staticmethod
     def _extract_partial_view_state(body: str) -> str | None:
-        """Read the updated JSF ViewState from a partial response without logging it."""
+        """Read updated JSF ViewState from a partial response without logging it."""
         match = re.search(
             r'<update\s+id=["\'](?:jakarta|javax)\.faces\.ViewState[^"\']*["\']\s*>\s*<!\[CDATA\[(.*?)\]\]>',
             body,
@@ -553,14 +611,17 @@ class LinzNetzClient:
         return values[:30]
 
     @classmethod
-    def _log_safe_form_diagnostics(cls, soup: BeautifulSoup, form: Tag | None) -> None:
+    def _log_safe_form_diagnostics(
+        cls, soup: BeautifulSoup, form: Tag | None
+    ) -> None:
         """Log structural diagnostics without credentials, sessions or HTML dumps."""
         forms = soup.find_all("form")
         form_id = None
         if form is not None:
             form_id = str(form.get("id") or form.get("name") or "") or None
         _LOGGER.warning(
-            "LINZ NETZ Parser-Diagnose: forms=%s selected_form=%s relevant_controls=%s choice_values=%s",
+            "LINZ NETZ Parser-Diagnose: forms=%s selected_form=%s "
+            "relevant_controls=%s choice_values=%s",
             len(forms),
             form_id,
             cls._safe_control_names(form),
@@ -569,7 +630,7 @@ class LinzNetzClient:
 
     @staticmethod
     def _parse_readings(body: str) -> list[QuarterReading]:
-        """Parse only timestamp and measured-consumption columns from table rows."""
+        """Parse timestamp and measured-consumption columns from table rows."""
         cdata_blocks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", body, flags=re.DOTALL)
         html = "\n".join(cdata_blocks) if cdata_blocks else body
         soup = BeautifulSoup(html, "html.parser")
@@ -586,7 +647,7 @@ class LinzNetzClient:
             if not value_match:
                 continue
             start = datetime.strptime(date_match.group(1), "%d.%m.%Y %H:%M")
-            value = float(value_match.group(0).replace(",", "."))
+            value = float(value_match.group(0).replace(", ".replace(" ", ""), "."))
             readings.append(QuarterReading(start_local=start, kwh=value))
 
         return readings

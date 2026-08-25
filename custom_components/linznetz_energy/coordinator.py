@@ -79,6 +79,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         )
         self._client = client
         self._entry = entry
+        self._backfill_attempted = False
         self.async_add_listener(self._dummy_listener)
 
     @callback
@@ -112,9 +113,13 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             ),
             MAX_BACKFILL_DAYS,
         )
-        run_backfill = bool(self._entry.options.get(CONF_RUN_BACKFILL, False))
+        backfill_requested = bool(
+            self._entry.options.get(CONF_RUN_BACKFILL, False)
+        )
+        run_backfill = backfill_requested and not self._backfill_attempted
 
         if run_backfill:
+            self._backfill_attempted = True
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
             _LOGGER.info("LINZ NETZ manual backfill requested: days=%s", backfill_days)
         elif last and last.get(STATISTIC_ID):
@@ -125,7 +130,9 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         else:
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
 
-        first_day_start = datetime.combine(start_day, datetime.min.time(), tzinfo=_VIENNA)
+        first_day_start = datetime.combine(
+            start_day, datetime.min.time(), tzinfo=_VIENNA
+        )
         energy_cumulative = await self._async_get_sum_before(
             STATISTIC_ID, first_day_start
         )
@@ -138,6 +145,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         cost_stats: list[StatisticData] = []
         imported_days = 0
         imported_quarters = 0
+        failed_days: list[datetime.date] = []
         yesterday_total: float | None = None
         yesterday_cost: float | None = None
 
@@ -147,6 +155,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                 readings = await self._client.async_fetch_quarter_readings(day)
             except LinzNetzError as err:
                 _LOGGER.warning("LINZ NETZ %s konnte nicht gelesen werden: %s", day, err)
+                failed_days.append(day)
                 day += timedelta(days=1)
                 continue
 
@@ -167,6 +176,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                     hourly_total,
                     quarter_total,
                 )
+                failed_days.append(day)
                 day += timedelta(days=1)
                 continue
 
@@ -246,15 +256,25 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
 
         _LOGGER.info(
             "LINZ NETZ import complete: days=%s quarters=%s energy_points=%s "
-            "cost_points=%s",
+            "cost_points=%s failed_days=%s",
             imported_days,
             imported_quarters,
             len(energy_stats),
             len(cost_stats),
+            len(failed_days),
         )
 
         if run_backfill:
-            self.hass.async_create_task(self._async_clear_backfill_request())
+            if failed_days:
+                _LOGGER.warning(
+                    "LINZ NETZ manual backfill incomplete: requested_days=%s "
+                    "imported_days=%s failed_days=%s; request flag remains set",
+                    backfill_days,
+                    imported_days,
+                    len(failed_days),
+                )
+            else:
+                self.hass.async_create_task(self._async_clear_backfill_request())
 
         return {
             "last_sync": datetime.now(_VIENNA),
@@ -263,10 +283,12 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             "new_hourly_statistics": len(energy_stats),
             "new_cost_statistics": len(cost_stats),
             "days_checked": imported_days,
+            "failed_days": len(failed_days),
+            "backfill_complete": not run_backfill or not failed_days,
         }
 
     async def _async_clear_backfill_request(self) -> None:
-        """Clear the one-shot manual backfill flag after an attempted run."""
+        """Clear the one-shot manual backfill flag after a complete run."""
         options = dict(self._entry.options)
         if not options.get(CONF_RUN_BACKFILL):
             return

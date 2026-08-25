@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/backfill-returned-day-validation
+      - fix/backfill-trigger-status
 
 jobs:
   test:
@@ -21,6 +21,7 @@ jobs:
         run: |
           python -m py_compile \
             custom_components/linznetz_energy/api.py \
+            custom_components/linznetz_energy/backfill.py \
             custom_components/linznetz_energy/coordinator.py
       - name: Run regression tests
-        run: pytest -q tests/test_api_day_validation.py
+        run: pytest -q tests/test_api_day_validation.py tests/test_backfill_state.py

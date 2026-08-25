@@ -53,3 +53,19 @@ def finalized_backfill_options(
 def manual_backfill_requested(options: Mapping[str, object]) -> bool:
     """Return whether a new one-shot backfill was explicitly requested."""
     return bool(options.get(CONF_RUN_BACKFILL, False))
+
+
+def migrate_legacy_backfill_options(
+    options: Mapping[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Clear a legacy trigger without changing unrelated config-entry options.
+
+    Config-entry version 1 predates the strict one-shot/result-status separation.
+    A persisted ``run_backfill=true`` from that version must not be interpreted
+    as a fresh user request after an integration upgrade.
+    """
+    result = dict(options)
+    legacy_trigger_cleared = bool(result.get(CONF_RUN_BACKFILL, False))
+    if legacy_trigger_cleared:
+        result[CONF_RUN_BACKFILL] = False
+    return result, legacy_trigger_cleared

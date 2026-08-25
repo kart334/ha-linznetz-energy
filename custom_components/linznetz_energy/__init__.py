@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from aiohttp import CookieJar
 
 from homeassistant.config_entries import ConfigEntry
@@ -10,10 +12,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from .api import LinzNetzClient
+from .backfill import migrate_legacy_backfill_options
 from .coordinator import LinzNetzCoordinator
 from .const import DOMAIN
 
 PLATFORMS = ["sensor"]
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -31,6 +35,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate legacy config entries without replaying stale backfill triggers."""
+    if config_entry.version == 1:
+        options, legacy_trigger_cleared = migrate_legacy_backfill_options(
+            config_entry.options
+        )
+        hass.config_entries.async_update_entry(
+            config_entry,
+            options=options,
+            version=2,
+        )
+        if legacy_trigger_cleared:
+            _LOGGER.warning(
+                "LINZ NETZ legacy manual-backfill trigger cleared during "
+                "config-entry migration; no historical backfill was started"
+            )
+        else:
+            _LOGGER.info("LINZ NETZ config entry migrated to version 2")
+        return True
+
+    if config_entry.version == 2:
+        return True
+
+    _LOGGER.error(
+        "LINZ NETZ config-entry migration from unsupported version %s failed",
+        config_entry.version,
+    )
+    return False
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

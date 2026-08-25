@@ -57,7 +57,7 @@ def _validate_tariff_history(value: str) -> str:
 class LinzNetzConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for LINZ NETZ Energy."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     @callback

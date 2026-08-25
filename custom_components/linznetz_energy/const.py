@@ -18,22 +18,8 @@ STATISTIC_NAME = "LINZ NETZ Stromverbrauch"
 COST_STATISTIC_ID = f"{DOMAIN}:energy_cost"
 COST_STATISTIC_NAME = "LINZ NETZ Energiekosten"
 
-# Known tariff history for the installation this integration was prepared for.
-# Cost statistics intentionally include energy + base price only. Network fees,
-# taxes and levies are excluded because no reliable current values are confirmed.
-DEFAULT_TARIFF_HISTORY = [
-    {
-        "valid_from": "2024-12-24",
-        "provider": "E.ON Energie Österreich",
-        "name": "historischer Tarif",
-        "energy_price": 0.264,
-        "base_price_month": 5.40,
-    },
-    {
-        "valid_from": "2025-10-01",
-        "provider": "E.ON Energie Österreich",
-        "name": "E.ON ÖkoStrom Treue",
-        "energy_price": 0.152388,
-        "base_price_month": 2.754,
-    },
-]
+# Tariffs are installation-specific and must be configured by the user.
+# The public integration intentionally ships no provider/contract-specific
+# defaults. If no tariff history is configured, consumption import continues
+# to work while cost statistics remain unavailable.
+DEFAULT_TARIFF_HISTORY: list[dict[str, object]] = []

@@ -1,0 +1,28 @@
+# Local secrets / credentials
+.env
+.env.*
+secrets.*
+credentials.json
+
+# Session / cookie material
+*.cookie
+*.cookies
+*.session
+cookies.txt
+
+# Browser / portal debug captures
+*.har
+_debug/
+debug/
+dumps/
+portal-dumps/
+portal-responses/
+
+# Python / editor noise
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store

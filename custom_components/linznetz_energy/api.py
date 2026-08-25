@@ -21,8 +21,10 @@ _NUMBER_RE: Final = re.compile(r"-?\d+(?:[.,]\d+)?")
 _VIEW_STATE_RE: Final = re.compile(r"(jakarta|javax)\.faces\.ViewState$")
 _FROM_RE: Final = re.compile(r"calendarFromRegion$", re.IGNORECASE)
 _TO_RE: Final = re.compile(r"calendarToRegion$", re.IGNORECASE)
+_SELECTED_CLASS_RE: Final = re.compile(r":selectedClass$", re.IGNORECASE)
 _QUARTER_TEXT_RE: Final = re.compile(r"viertelstunden|quarter", re.IGNORECASE)
 _KWH_TEXT_RE: Final = re.compile(r"\bkwh\b|energiemenge", re.IGNORECASE)
+_TABLE_ID_RE: Final = re.compile(r":consumptionsTable$", re.IGNORECASE)
 
 
 class LinzNetzError(Exception):
@@ -51,6 +53,15 @@ class ChoiceField:
 
     name: str
     value: str
+
+
+@dataclass(frozen=True)
+class PaginationInfo:
+    """PrimeFaces DataTable pagination metadata."""
+
+    table_id: str
+    rows: int
+    row_count: int
 
 
 class LinzNetzClient:
@@ -103,7 +114,6 @@ class LinzNetzClient:
             elif input_type == "hidden":
                 payload[name] = input_tag.get("value", "")
 
-        # Keycloak-style forms normally use these exact names.
         payload.setdefault("username", self._username)
         payload.setdefault("password", self._password)
 
@@ -120,7 +130,6 @@ class LinzNetzClient:
         if self._contains_password_form(login_html):
             raise LinzNetzAuthError("Anmeldung bei LINZ NETZ abgelehnt")
 
-        # Ensure the service application itself now accepts the SSO session.
         verify = await self._session.get(PORTAL_URL, allow_redirects=True)
         verify.raise_for_status()
         verify_html = await verify.text()
@@ -128,7 +137,7 @@ class LinzNetzClient:
             raise LinzNetzAuthError("SSO-Sitzung wurde nicht übernommen")
 
     async def async_fetch_quarter_readings(self, day: date) -> list[QuarterReading]:
-        """Fetch the 15-minute kWh values for one local calendar day."""
+        """Fetch all 15-minute kWh values for one local calendar day."""
         response = await self._session.get(PORTAL_URL, allow_redirects=True)
         response.raise_for_status()
         html = await response.text()
@@ -152,11 +161,12 @@ class LinzNetzClient:
 
         view_state = form.find("input", attrs={"name": _VIEW_STATE_RE})
         if view_state is None:
-            # Some JSF pages place ViewState outside the business form.
             view_state = soup.find("input", attrs={"name": _VIEW_STATE_RE})
         if view_state is None or not view_state.get("name"):
             self._log_safe_form_diagnostics(soup, form)
             raise LinzNetzParseError("JSF ViewState nicht gefunden")
+        view_state_name = str(view_state.get("name"))
+        view_state_value = str(view_state.get("value", ""))
 
         quarter_field = self._find_choice_field(
             form,
@@ -203,10 +213,12 @@ class LinzNetzClient:
             str(from_input.get("name")): day_text,
             str(to_input.get("name")): day_text,
             kwh_field.name: kwh_field.value,
-            str(view_state.get("name")): str(view_state.get("value", "")),
+            view_state_name: view_state_value,
         }
 
-        period_input = form.find("input", attrs={"name": re.compile(r"periodRange$", re.IGNORECASE)})
+        period_input = form.find(
+            "input", attrs={"name": re.compile(r"periodRange$", re.IGNORECASE)}
+        )
         if period_input is not None and period_input.get("name"):
             payload[str(period_input.get("name"))] = str(
                 period_input.get("value", "valid")
@@ -230,7 +242,55 @@ class LinzNetzClient:
             raise LinzNetzParseError(
                 f"Keine Viertelstundenwerte für {day_text} gefunden"
             )
-        return readings
+
+        pagination = self._parse_pagination(body)
+        if pagination is None or pagination.row_count <= len(readings):
+            return readings
+
+        latest_view_state = self._extract_partial_view_state(body) or view_state_value
+        all_readings = list(readings)
+
+        for first in range(pagination.rows, pagination.row_count, pagination.rows):
+            page_payload = dict(payload)
+            page_payload.update(
+                {
+                    "jakarta.faces.source": pagination.table_id,
+                    "jakarta.faces.partial.execute": pagination.table_id,
+                    "jakarta.faces.partial.render": pagination.table_id,
+                    pagination.table_id: pagination.table_id,
+                    f"{pagination.table_id}_pagination": "true",
+                    f"{pagination.table_id}_first": str(first),
+                    f"{pagination.table_id}_rows": str(pagination.rows),
+                    f"{pagination.table_id}_skipChildren": "true",
+                    f"{pagination.table_id}_encodeFeature": "true",
+                    view_state_name: latest_view_state,
+                }
+            )
+            page_result = await self._session.post(
+                PORTAL_URL,
+                data=page_payload,
+                headers=headers,
+                allow_redirects=True,
+            )
+            page_result.raise_for_status()
+            page_body = await page_result.text()
+            page_readings = self._parse_readings(page_body)
+            if not page_readings:
+                raise LinzNetzParseError(
+                    f"PrimeFaces-Seite ab Datensatz {first} lieferte keine Werte"
+                )
+            all_readings.extend(page_readings)
+            latest_view_state = (
+                self._extract_partial_view_state(page_body) or latest_view_state
+            )
+
+        if len(all_readings) < pagination.row_count:
+            raise LinzNetzParseError(
+                "PrimeFaces-Paginierung unvollständig: "
+                f"{len(all_readings)} von {pagination.row_count} Werten gelesen"
+            )
+
+        return all_readings[: pagination.row_count]
 
     @staticmethod
     def _contains_password_form(html: str) -> bool:
@@ -256,6 +316,8 @@ class LinzNetzClient:
                 score += 3
             if cls._contains_semantic_marker(form, "KWH", _KWH_TEXT_RE):
                 score += 3
+            if form.find("input", attrs={"name": _SELECTED_CLASS_RE}) is not None:
+                score += 2
             if cls._find_display_button(form) is not None:
                 score += 2
             if form.find(id=re.compile(r":list$", re.IGNORECASE)) is not None:
@@ -265,7 +327,6 @@ class LinzNetzClient:
                 best_form = form
                 best_score = score
 
-        # A score below 4 means we did not even find one strong consumption marker.
         return best_form if best_score >= 4 else None
 
     @staticmethod
@@ -286,27 +347,50 @@ class LinzNetzClient:
         desired_value: str,
         label_re: re.Pattern[str],
     ) -> ChoiceField | None:
-        """Resolve PrimeFaces/JSF radio, select, hidden or label-backed choices."""
+        """Resolve dynamic PrimeFaces/JSF choice controls semantically."""
         desired_lower = desired_value.lower()
 
-        # 1. Direct controls, including hidden inputs and radio buttons.
+        # The real LINZ NETZ request uses dynamic JSF component IDs whose
+        # submitted field names end in :selectedClass. Prefer those controls.
+        selected_class_fields = [
+            tag
+            for tag in form.find_all(["input", "select"])
+            if _SELECTED_CLASS_RE.search(str(tag.get("name") or ""))
+        ]
+        for tag in selected_class_fields:
+            value = str(tag.get("value") or "")
+            if value.lower() == desired_lower and tag.get("name"):
+                return ChoiceField(str(tag.get("name")), desired_value)
+
+        # The period selector may currently contain another Consum* value on the
+        # initial GET. That still identifies the correct dynamic selectedClass
+        # field without relying on the generated j_idt... component IDs.
+        if desired_value.startswith("Consum"):
+            for tag in selected_class_fields:
+                value = str(tag.get("value") or "")
+                if value.lower().startswith("consum") and tag.get("name"):
+                    return ChoiceField(str(tag.get("name")), desired_value)
+
+        # Match selectedClass controls by their surrounding visible component text.
+        for tag in selected_class_fields:
+            if cls._control_context_matches(tag, form, label_re) and tag.get("name"):
+                return ChoiceField(str(tag.get("name")), desired_value)
+
+        # Direct controls, including hidden inputs and radio buttons.
         for tag in form.find_all(["input", "button"]):
             value = str(tag.get("value") or "")
             if value.lower() == desired_lower and tag.get("name"):
                 return ChoiceField(str(tag.get("name")), desired_value)
 
-        # 2. Native select/option structures: the field name belongs to <select>.
+        # Native select/option structures.
         for option in form.find_all("option"):
             value = str(option.get("value") or "")
             text = option.get_text(" ", strip=True)
             if value.lower() == desired_lower or label_re.search(text):
                 parent = option.find_parent("select")
                 if parent is not None and parent.get("name"):
-                    submit_value = value or desired_value
-                    return ChoiceField(str(parent.get("name")), submit_value)
+                    return ChoiceField(str(parent.get("name")), value or desired_value)
 
-        # 3. Name/id may carry the semantic marker even when the option value is
-        # rendered later by PrimeFaces JavaScript.
         token_re = re.compile(re.escape(desired_value), re.IGNORECASE)
         for tag in form.find_all(["input", "select", "button"]):
             name = str(tag.get("name") or "")
@@ -314,13 +398,10 @@ class LinzNetzClient:
             if (token_re.search(name) or token_re.search(tag_id)) and name:
                 return ChoiceField(name, desired_value)
 
-        # 4. Visible labels. PrimeFaces often renders a label beside a hidden or
-        # radio input. Resolve the label's `for` target, then nearby controls.
         for label in form.find_all("label"):
             text = label.get_text(" ", strip=True)
             if not label_re.search(text):
                 continue
-
             target_id = label.get("for")
             if target_id:
                 target = form.find(id=target_id)
@@ -328,52 +409,39 @@ class LinzNetzClient:
                 if resolved is not None:
                     return resolved
 
-            for ancestor in label.parents:
-                if ancestor is form:
-                    break
-                if not isinstance(ancestor, Tag):
-                    continue
-                for candidate in ancestor.find_all(["input", "select"], limit=10):
-                    resolved = cls._choice_from_target(candidate, desired_value)
-                    if resolved is not None:
-                        return resolved
-
-        # 5. Last semantic fallback: inspect short visible component text and its
-        # nearby controls without relying on a specific PrimeFaces widget tree.
-        for container in form.find_all(["div", "span", "td", "li"]):
-            text = container.get_text(" ", strip=True)
-            if not text or len(text) > 160 or not label_re.search(text):
-                continue
-            for candidate in container.find_all(["input", "select"], limit=10):
-                resolved = cls._choice_from_target(candidate, desired_value)
-                if resolved is not None:
-                    return resolved
-
         return None
+
+    @staticmethod
+    def _control_context_matches(
+        control: Tag,
+        form: Tag,
+        label_re: re.Pattern[str],
+    ) -> bool:
+        """Check a few nearby component containers for semantic visible text."""
+        ancestor: Tag | None = control
+        for _ in range(5):
+            parent = ancestor.parent if ancestor is not None else None
+            if not isinstance(parent, Tag) or parent is form:
+                break
+            text = parent.get_text(" ", strip=True)
+            if text and len(text) <= 500 and label_re.search(text):
+                return True
+            ancestor = parent
+        return False
 
     @staticmethod
     def _choice_from_target(target: Tag | None, desired_value: str) -> ChoiceField | None:
         if target is None:
             return None
-
         if target.name == "select" and target.get("name"):
             return ChoiceField(str(target.get("name")), desired_value)
-
         if target.name == "input" and target.get("name"):
             value = str(target.get("value") or desired_value)
             if value in {"", "on"}:
                 value = desired_value
             return ChoiceField(str(target.get("name")), value)
-
         if target.get("name"):
             return ChoiceField(str(target.get("name")), desired_value)
-
-        nested = target.find(["input", "select"]) if isinstance(target, Tag) else None
-        if nested is not None and nested.get("name"):
-            value = str(nested.get("value") or desired_value)
-            if value in {"", "on"}:
-                value = desired_value
-            return ChoiceField(str(nested.get("name")), value)
         return None
 
     @classmethod
@@ -405,7 +473,6 @@ class LinzNetzClient:
             value = tag.get("value", "")
             if "ANZEIGEN" in text.upper() or "ANZEIGEN" in str(value).upper():
                 return tag
-        # Observed current portal id; fallback only after semantic lookup.
         return form.find(id=re.compile(r"btnIdA1$", re.IGNORECASE))
 
     @staticmethod
@@ -416,13 +483,50 @@ class LinzNetzClient:
         return f"{form_id}:list"
 
     @staticmethod
+    def _extract_partial_view_state(body: str) -> str | None:
+        """Read the updated JSF ViewState from a partial response without logging it."""
+        match = re.search(
+            r'<update\s+id=["\'](?:jakarta|javax)\.faces\.ViewState[^"\']*["\']\s*>\s*<!\[CDATA\[(.*?)\]\]>',
+            body,
+            flags=re.DOTALL,
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _parse_pagination(body: str) -> PaginationInfo | None:
+        """Resolve PrimeFaces DataTable id, page size and total row count."""
+        table_match = re.search(
+            r'<table[^>]+id=["\']([^"\']+:consumptionsTable)["\']',
+            body,
+            flags=re.IGNORECASE,
+        )
+        if table_match is None:
+            return None
+
+        rows_match = re.search(r'["\']?rows["\']?\s*:\s*(\d+)', body)
+        row_count_match = re.search(r'["\']?rowCount["\']?\s*:\s*(\d+)', body)
+        if rows_match is None or row_count_match is None:
+            return None
+
+        rows = int(rows_match.group(1))
+        row_count = int(row_count_match.group(1))
+        if rows <= 0 or row_count <= 0:
+            return None
+
+        return PaginationInfo(
+            table_id=table_match.group(1),
+            rows=rows,
+            row_count=row_count,
+        )
+
+    @staticmethod
     def _safe_control_names(form: Tag | None) -> list[str]:
         """Return only structural field names, never field values."""
         if form is None:
             return []
         names: list[str] = []
         relevant_re = re.compile(
-            r"calendar|consum|quarter|kwh|energy|period|btn|list",
+            r"calendar|consum|quarter|kwh|energy|period|btn|list|selectedClass",
             re.IGNORECASE,
         )
         for tag in form.find_all(["input", "select", "button", "textarea"]):
@@ -465,12 +569,9 @@ class LinzNetzClient:
 
     @staticmethod
     def _parse_readings(body: str) -> list[QuarterReading]:
-        update_match = re.search(
-            r"<!\[CDATA\[(.*?)\]\]>",
-            body,
-            flags=re.DOTALL,
-        )
-        html = update_match.group(1) if update_match else body
+        """Parse only timestamp and measured-consumption columns from table rows."""
+        cdata_blocks = re.findall(r"<!\[CDATA\[(.*?)\]\]>", body, flags=re.DOTALL)
+        html = "\n".join(cdata_blocks) if cdata_blocks else body
         soup = BeautifulSoup(html, "html.parser")
 
         readings: list[QuarterReading] = []

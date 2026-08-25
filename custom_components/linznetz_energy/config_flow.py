@@ -9,7 +9,7 @@ import logging
 from aiohttp import CookieJar
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigEntry, OptionsFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, OptionsFlow
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
@@ -62,7 +62,8 @@ class LinzNetzConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
-        return LinzNetzOptionsFlow(config_entry)
+        """Return the options flow handler."""
+        return LinzNetzOptionsFlow()
 
     async def async_step_user(self, user_input=None):
         """Create the entry after validating the portal login."""
@@ -110,9 +111,6 @@ class LinzNetzConfigFlow(ConfigFlow, domain=DOMAIN):
 class LinzNetzOptionsFlow(OptionsFlow):
     """Configure tariff history and one-shot historical backfill."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self._entry = config_entry
-
     async def async_step_init(self, user_input=None):
         errors = {}
         if user_input is not None:
@@ -121,15 +119,17 @@ class LinzNetzOptionsFlow(OptionsFlow):
             except vol.Invalid:
                 errors[CONF_TARIFF_HISTORY] = "invalid_tariff_history"
             else:
-                return self.async_create_entry(title="", data=user_input)
+                return self.async_create_entry(
+                    data=self.config_entry.options | user_input
+                )
 
         current_backfill = int(
-            self._entry.options.get(
+            self.config_entry.options.get(
                 CONF_BACKFILL_DAYS,
-                self._entry.data.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS),
+                self.config_entry.data.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS),
             )
         )
-        current_tariffs = self._entry.options.get(
+        current_tariffs = self.config_entry.options.get(
             CONF_TARIFF_HISTORY,
             _default_tariff_json(),
         )

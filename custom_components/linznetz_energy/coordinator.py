@@ -30,9 +30,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util.unit_conversion import EnergyConverter
 
 from .api import LinzNetzAuthError, LinzNetzClient, LinzNetzError
+from .backfill import finalized_backfill_options, manual_backfill_requested
 from .const import (
     CONF_BACKFILL_DAYS,
-    CONF_RUN_BACKFILL,
+    CONF_LAST_BACKFILL_STATUS,
     CONF_TARIFF_HISTORY,
     COST_STATISTIC_ID,
     COST_STATISTIC_NAME,
@@ -79,7 +80,6 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         )
         self._client = client
         self._entry = entry
-        self._backfill_attempted = False
         self.async_add_listener(self._dummy_listener)
 
     @callback
@@ -113,13 +113,9 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             ),
             MAX_BACKFILL_DAYS,
         )
-        backfill_requested = bool(
-            self._entry.options.get(CONF_RUN_BACKFILL, False)
-        )
-        run_backfill = backfill_requested and not self._backfill_attempted
+        run_backfill = manual_backfill_requested(self._entry.options)
 
         if run_backfill:
-            self._backfill_attempted = True
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
             _LOGGER.info("LINZ NETZ manual backfill requested: days=%s", backfill_days)
         elif last and last.get(STATISTIC_ID):
@@ -264,17 +260,36 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             len(failed_days),
         )
 
+        backfill_status = self._entry.options.get(CONF_LAST_BACKFILL_STATUS)
         if run_backfill:
-            if failed_days:
+            requested_days = (yesterday - start_day).days + 1
+            new_options = finalized_backfill_options(
+                self._entry.options,
+                requested_days=requested_days,
+                imported_days=imported_days,
+                failed_days=len(failed_days),
+            )
+            backfill_status = new_options[CONF_LAST_BACKFILL_STATUS]
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                options=new_options,
+            )
+            if backfill_status == "success":
+                _LOGGER.info(
+                    "LINZ NETZ manual backfill complete: requested_days=%s "
+                    "imported_days=%s failed_days=0",
+                    requested_days,
+                    imported_days,
+                )
+            else:
                 _LOGGER.warning(
-                    "LINZ NETZ manual backfill incomplete: requested_days=%s "
-                    "imported_days=%s failed_days=%s; request flag remains set",
-                    backfill_days,
+                    "LINZ NETZ manual backfill %s: requested_days=%s "
+                    "imported_days=%s failed_days=%s; one-shot trigger consumed",
+                    backfill_status,
+                    requested_days,
                     imported_days,
                     len(failed_days),
                 )
-            else:
-                self.hass.async_create_task(self._async_clear_backfill_request())
 
         return {
             "last_sync": datetime.now(_VIENNA),
@@ -284,16 +299,8 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             "new_cost_statistics": len(cost_stats),
             "days_checked": imported_days,
             "failed_days": len(failed_days),
-            "backfill_complete": not run_backfill or not failed_days,
+            "backfill_status": backfill_status,
         }
-
-    async def _async_clear_backfill_request(self) -> None:
-        """Clear the one-shot manual backfill flag after a complete run."""
-        options = dict(self._entry.options)
-        if not options.get(CONF_RUN_BACKFILL):
-            return
-        options[CONF_RUN_BACKFILL] = False
-        self.hass.config_entries.async_update_entry(self._entry, options=options)
 
     @staticmethod
     def _energy_metadata() -> StatisticMetaData:

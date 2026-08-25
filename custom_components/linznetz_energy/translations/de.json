@@ -19,5 +19,21 @@
     "abort": {
       "already_configured": "LINZ NETZ Energy ist bereits eingerichtet."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "LINZ NETZ Energy Optionen",
+        "description": "Tarifhistorie und einmaligen historischen Backfill konfigurieren. Die Kostenstatistik enthält nur Energie + Grundpreis, keine Netzgebühren, Steuern oder Abgaben.",
+        "data": {
+          "backfill_days": "Backfill-Zeitraum (Tage, max. 395)",
+          "run_backfill": "Backfill einmalig jetzt ausführen",
+          "tariff_history": "Tarifhistorie (JSON)"
+        }
+      }
+    },
+    "error": {
+      "invalid_tariff_history": "Tarifhistorie ist ungültig. Erwartet wird eine JSON-Liste mit valid_from, energy_price und base_price_month."
+    }
   }
 }

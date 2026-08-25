@@ -38,7 +38,7 @@ def _validate_tariff_history(value: str) -> str:
         parsed = json.loads(value)
     except (TypeError, ValueError) as err:
         raise vol.Invalid("invalid_json") from err
-    if not isinstance(parsed, list) or not parsed:
+    if not isinstance(parsed, list):
         raise vol.Invalid("invalid_tariff_history")
     for item in parsed:
         if not isinstance(item, dict):

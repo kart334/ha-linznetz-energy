@@ -79,6 +79,11 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         )
         self._client = client
         self._entry = entry
+        # A failed one-shot backfill remains requested in options so it is not
+        # falsely recorded as successful. Suppress automatic retries for the
+        # lifetime of this coordinator; a reload/restart or explicit option
+        # change can intentionally retry it.
+        self._backfill_attempted = False
         self.async_add_listener(self._dummy_listener)
 
     @callback
@@ -112,12 +117,19 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             ),
             MAX_BACKFILL_DAYS,
         )
-        run_backfill = bool(self._entry.options.get(CONF_RUN_BACKFILL, False))
+        backfill_requested = bool(self._entry.options.get(CONF_RUN_BACKFILL, False))
+        run_backfill = backfill_requested and not self._backfill_attempted
 
         if run_backfill:
+            self._backfill_attempted = True
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
             _LOGGER.info("LINZ NETZ manual backfill requested: days=%s", backfill_days)
         elif last and last.get(STATISTIC_ID):
+            if backfill_requested:
+                _LOGGER.warning(
+                    "LINZ NETZ manual backfill remains pending after a failed attempt; "
+                    "regular refresh continues without automatic full-backfill retry"
+                )
             last_start = datetime.fromtimestamp(
                 last[STATISTIC_ID][0]["start"], tz=_VIENNA
             )
@@ -125,7 +137,9 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         else:
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
 
-        first_day_start = datetime.combine(start_day, datetime.min.time(), tzinfo=_VIENNA)
+        first_day_start = datetime.combine(
+            start_day, datetime.min.time(), tzinfo=_VIENNA
+        )
         energy_cumulative = await self._async_get_sum_before(
             STATISTIC_ID, first_day_start
         )
@@ -138,6 +152,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         cost_stats: list[StatisticData] = []
         imported_days = 0
         imported_quarters = 0
+        failed_days: list[datetime.date] = []
         yesterday_total: float | None = None
         yesterday_cost: float | None = None
 
@@ -147,6 +162,8 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                 readings = await self._client.async_fetch_quarter_readings(day)
             except LinzNetzError as err:
                 _LOGGER.warning("LINZ NETZ %s konnte nicht gelesen werden: %s", day, err)
+                if run_backfill:
+                    failed_days.append(day)
                 day += timedelta(days=1)
                 continue
 
@@ -167,6 +184,8 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                     hourly_total,
                     quarter_total,
                 )
+                if run_backfill:
+                    failed_days.append(day)
                 day += timedelta(days=1)
                 continue
 
@@ -253,8 +272,25 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             len(cost_stats),
         )
 
+        backfill_complete: bool | None = None
         if run_backfill:
-            self.hass.async_create_task(self._async_clear_backfill_request())
+            backfill_complete = not failed_days
+            if backfill_complete:
+                self.hass.async_create_task(self._async_clear_backfill_request())
+                _LOGGER.info(
+                    "LINZ NETZ manual backfill complete: requested_days=%s imported_days=%s",
+                    backfill_days,
+                    imported_days,
+                )
+            else:
+                _LOGGER.warning(
+                    "LINZ NETZ manual backfill incomplete: requested_days=%s "
+                    "imported_days=%s failed_days=%s first_failed=%s",
+                    backfill_days,
+                    imported_days,
+                    len(failed_days),
+                    failed_days[0] if failed_days else None,
+                )
 
         return {
             "last_sync": datetime.now(_VIENNA),
@@ -263,10 +299,12 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             "new_hourly_statistics": len(energy_stats),
             "new_cost_statistics": len(cost_stats),
             "days_checked": imported_days,
+            "backfill_complete": backfill_complete,
+            "backfill_failed_days": len(failed_days),
         }
 
     async def _async_clear_backfill_request(self) -> None:
-        """Clear the one-shot manual backfill flag after an attempted run."""
+        """Clear the one-shot manual backfill flag after a successful run."""
         options = dict(self._entry.options)
         if not options.get(CONF_RUN_BACKFILL):
             return
@@ -337,7 +375,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         return float(previous_rows[-1].get("sum") or 0.0)
 
     def _load_tariffs(self) -> list[TariffPeriod]:
-        """Load validated tariff history from options or built-in confirmed data."""
+        """Load validated tariff history from options or neutral defaults."""
         raw = self._entry.options.get(CONF_TARIFF_HISTORY)
         source = DEFAULT_TARIFF_HISTORY
         if isinstance(raw, str) and raw.strip():
@@ -347,7 +385,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                     source = parsed
             except (TypeError, ValueError):
                 _LOGGER.warning(
-                    "LINZ NETZ Tarifhistorie ungueltig; bestaetigte Standardhistorie wird verwendet"
+                    "LINZ NETZ Tarifhistorie ungueltig; neutrale Standardhistorie wird verwendet"
                 )
 
         periods: list[TariffPeriod] = []

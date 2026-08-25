@@ -3,7 +3,15 @@
 DOMAIN = "linznetz_energy"
 CONF_BACKFILL_DAYS = "backfill_days"
 CONF_RUN_BACKFILL = "run_backfill"
+CONF_LAST_BACKFILL_STATUS = "last_backfill_status"
+CONF_LAST_BACKFILL_REQUESTED_DAYS = "last_backfill_requested_days"
+CONF_LAST_BACKFILL_IMPORTED_DAYS = "last_backfill_imported_days"
+CONF_LAST_BACKFILL_FAILED_DAYS = "last_backfill_failed_days"
 CONF_TARIFF_HISTORY = "tariff_history"
+
+BACKFILL_STATUS_SUCCESS = "success"
+BACKFILL_STATUS_PARTIAL = "partial"
+BACKFILL_STATUS_FAILED = "failed"
 
 DEFAULT_BACKFILL_DAYS = 30
 MAX_BACKFILL_DAYS = 395

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+import json
 import logging
 import math
 from zoneinfo import ZoneInfo
@@ -29,8 +32,14 @@ from homeassistant.util.unit_conversion import EnergyConverter
 from .api import LinzNetzAuthError, LinzNetzClient, LinzNetzError
 from .const import (
     CONF_BACKFILL_DAYS,
+    CONF_RUN_BACKFILL,
+    CONF_TARIFF_HISTORY,
+    COST_STATISTIC_ID,
+    COST_STATISTIC_NAME,
     DEFAULT_BACKFILL_DAYS,
+    DEFAULT_TARIFF_HISTORY,
     DOMAIN,
+    MAX_BACKFILL_DAYS,
     STATISTIC_ID,
     STATISTIC_NAME,
     UPDATE_INTERVAL_HOURS,
@@ -38,6 +47,18 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 _VIENNA = ZoneInfo("Europe/Vienna")
+_EUR = "EUR"
+
+
+@dataclass(frozen=True)
+class TariffPeriod:
+    """One tariff period used for historical cost calculation."""
+
+    valid_from: datetime
+    energy_price: Decimal
+    base_price_month: Decimal
+    provider: str
+    name: str
 
 
 class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
@@ -82,30 +103,43 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
         )
 
         yesterday = datetime.now(_VIENNA).date() - timedelta(days=1)
-        backfill_days = int(
-            self._entry.options.get(
-                CONF_BACKFILL_DAYS,
-                self._entry.data.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS),
-            )
+        backfill_days = min(
+            int(
+                self._entry.options.get(
+                    CONF_BACKFILL_DAYS,
+                    self._entry.data.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS),
+                )
+            ),
+            MAX_BACKFILL_DAYS,
         )
+        run_backfill = bool(self._entry.options.get(CONF_RUN_BACKFILL, False))
 
-        if last and last.get(STATISTIC_ID):
+        if run_backfill:
+            start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
+            _LOGGER.info("LINZ NETZ manual backfill requested: days=%s", backfill_days)
+        elif last and last.get(STATISTIC_ID):
             last_start = datetime.fromtimestamp(
                 last[STATISTIC_ID][0]["start"], tz=_VIENNA
             )
-            start_day = max(
-                last_start.date(),
-                yesterday - timedelta(days=2),
-            )
+            start_day = max(last_start.date(), yesterday - timedelta(days=2))
         else:
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
 
         first_day_start = datetime.combine(start_day, datetime.min.time(), tzinfo=_VIENNA)
-        cumulative = await self._async_get_sum_before(first_day_start)
+        energy_cumulative = await self._async_get_sum_before(
+            STATISTIC_ID, first_day_start
+        )
+        cost_cumulative = await self._async_get_sum_before(
+            COST_STATISTIC_ID, first_day_start
+        )
+        tariffs = self._load_tariffs()
 
-        stats: list[StatisticData] = []
+        energy_stats: list[StatisticData] = []
+        cost_stats: list[StatisticData] = []
         imported_days = 0
+        imported_quarters = 0
         yesterday_total: float | None = None
+        yesterday_cost: float | None = None
 
         day = start_day
         while day <= yesterday:
@@ -136,67 +170,149 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                 day += timedelta(days=1)
                 continue
 
-            day_total = quarter_total
-            if day == yesterday:
-                yesterday_total = day_total
+            day_cost_decimal = Decimal("0")
+            day_cost_complete = True
+            tariff_labels: set[str] = set()
 
             _LOGGER.info(
                 "LINZ NETZ statistics day=%s hours=%s previous_sum=%.6f",
                 day,
                 len(hourly),
-                cumulative,
+                energy_cumulative,
             )
 
-            # Always write the complete day again. Home Assistant's external
-            # statistics importer updates an existing row when statistic_id and
-            # start timestamp already exist, so a previous partial import is
-            # corrected instead of being skipped.
             for start, value in sorted(hourly.items()):
-                cumulative += value
-                stats.append(StatisticData(start=start, state=value, sum=cumulative))
+                energy_cumulative += value
+                energy_stats.append(
+                    StatisticData(start=start, state=value, sum=energy_cumulative)
+                )
 
+                tariff = self._tariff_for(start, tariffs)
+                if tariff is None:
+                    day_cost_complete = False
+                    continue
+
+                tariff_labels.add(
+                    f"{tariff.valid_from.date()} {tariff.provider} {tariff.name}"
+                )
+                hour_cost = self._hour_cost(start, value, tariff)
+                day_cost_decimal += hour_cost
+                cost_cumulative += float(hour_cost)
+                cost_stats.append(
+                    StatisticData(
+                        start=start,
+                        state=float(hour_cost),
+                        sum=cost_cumulative,
+                    )
+                )
+
+            imported_quarters += len(readings)
             imported_days += 1
+
+            day_total = quarter_total
+            if day == yesterday:
+                yesterday_total = day_total
+                if day_cost_complete:
+                    yesterday_cost = float(day_cost_decimal)
+
+            if tariff_labels:
+                _LOGGER.info(
+                    "LINZ NETZ tariffs day=%s periods=%s",
+                    day,
+                    sorted(tariff_labels),
+                )
+            if not day_cost_complete:
+                _LOGGER.warning(
+                    "LINZ NETZ Kosten fuer %s unvollstaendig: keine bestaetigte "
+                    "Tarifperiode fuer mindestens eine Stunde",
+                    day,
+                )
+
             day += timedelta(days=1)
 
-        if stats:
-            metadata = StatisticMetaData(
-                mean_type=StatisticMeanType.NONE,
-                has_sum=True,
-                name=STATISTIC_NAME,
-                source=DOMAIN,
-                statistic_id=STATISTIC_ID,
-                unit_class=EnergyConverter.UNIT_CLASS,
-                unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        if energy_stats:
+            async_add_external_statistics(
+                self.hass,
+                self._energy_metadata(),
+                energy_stats,
             )
-            async_add_external_statistics(self.hass, metadata, stats)
+
+        if cost_stats:
+            async_add_external_statistics(
+                self.hass,
+                self._cost_metadata(),
+                cost_stats,
+            )
+
+        _LOGGER.info(
+            "LINZ NETZ import complete: days=%s quarters=%s energy_points=%s "
+            "cost_points=%s",
+            imported_days,
+            imported_quarters,
+            len(energy_stats),
+            len(cost_stats),
+        )
+
+        if run_backfill:
+            self.hass.async_create_task(self._async_clear_backfill_request())
 
         return {
             "last_sync": datetime.now(_VIENNA),
             "yesterday_kwh": yesterday_total,
-            "new_hourly_statistics": len(stats),
+            "yesterday_cost_eur": yesterday_cost,
+            "new_hourly_statistics": len(energy_stats),
+            "new_cost_statistics": len(cost_stats),
             "days_checked": imported_days,
         }
 
-    async def _async_get_sum_before(self, start: datetime) -> float:
-        """Return the cumulative statistic sum immediately before ``start``.
+    async def _async_clear_backfill_request(self) -> None:
+        """Clear the one-shot manual backfill flag after an attempted run."""
+        options = dict(self._entry.options)
+        if not options.get(CONF_RUN_BACKFILL):
+            return
+        options[CONF_RUN_BACKFILL] = False
+        self.hass.config_entries.async_update_entry(self._entry, options=options)
 
-        Prefer deriving the base from an existing row at the start of the day.
-        That makes re-imports deterministic even when that day was previously
-        only partially imported. If the first row is missing, fall back to the
-        latest historical sum before the day.
-        """
+    @staticmethod
+    def _energy_metadata() -> StatisticMetaData:
+        return StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=STATISTIC_NAME,
+            source=DOMAIN,
+            statistic_id=STATISTIC_ID,
+            unit_class=EnergyConverter.UNIT_CLASS,
+            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        )
+
+    @staticmethod
+    def _cost_metadata() -> StatisticMetaData:
+        return StatisticMetaData(
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name=COST_STATISTIC_NAME,
+            source=DOMAIN,
+            statistic_id=COST_STATISTIC_ID,
+            unit_class=None,
+            unit_of_measurement=_EUR,
+        )
+
+    async def _async_get_sum_before(
+        self, statistic_id: str, start: datetime
+    ) -> float:
+        """Return the cumulative statistic sum immediately before ``start``."""
         first_hour_end = start + timedelta(hours=1)
         current = await get_instance(self.hass).async_add_executor_job(
             statistics_during_period,
             self.hass,
             start,
             first_hour_end,
-            {STATISTIC_ID},
+            {statistic_id},
             "hour",
             None,
             {"state", "sum"},
         )
-        rows = current.get(STATISTIC_ID, [])
+        rows = current.get(statistic_id, [])
         if rows:
             first = rows[0]
             if float(first.get("start", -1.0)) == start.timestamp():
@@ -210,15 +326,80 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             self.hass,
             history_start,
             start,
-            {STATISTIC_ID},
+            {statistic_id},
             "hour",
             None,
             {"sum"},
         )
-        previous_rows = previous.get(STATISTIC_ID, [])
+        previous_rows = previous.get(statistic_id, [])
         if not previous_rows:
             return 0.0
         return float(previous_rows[-1].get("sum") or 0.0)
+
+    def _load_tariffs(self) -> list[TariffPeriod]:
+        """Load validated tariff history from options or built-in confirmed data."""
+        raw = self._entry.options.get(CONF_TARIFF_HISTORY)
+        source = DEFAULT_TARIFF_HISTORY
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    source = parsed
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "LINZ NETZ Tarifhistorie ungueltig; bestaetigte Standardhistorie wird verwendet"
+                )
+
+        periods: list[TariffPeriod] = []
+        for item in source:
+            try:
+                valid_from = datetime.strptime(
+                    str(item["valid_from"]), "%Y-%m-%d"
+                ).replace(tzinfo=_VIENNA)
+                periods.append(
+                    TariffPeriod(
+                        valid_from=valid_from,
+                        energy_price=Decimal(str(item["energy_price"])),
+                        base_price_month=Decimal(str(item["base_price_month"])),
+                        provider=str(item.get("provider", "")),
+                        name=str(item.get("name", "")),
+                    )
+                )
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                _LOGGER.warning(
+                    "LINZ NETZ Tarifperiode ignoriert: unvollstaendige oder ungueltige Felder"
+                )
+        return sorted(periods, key=lambda period: period.valid_from)
+
+    @staticmethod
+    def _tariff_for(
+        start: datetime, tariffs: list[TariffPeriod]
+    ) -> TariffPeriod | None:
+        applicable = [period for period in tariffs if period.valid_from <= start]
+        return applicable[-1] if applicable else None
+
+    @staticmethod
+    def _hours_in_month(start: datetime) -> Decimal:
+        """Return actual local-clock hours in the calendar month, including DST."""
+        month_start = datetime(start.year, start.month, 1, tzinfo=_VIENNA)
+        if start.month == 12:
+            next_month = datetime(start.year + 1, 1, 1, tzinfo=_VIENNA)
+        else:
+            next_month = datetime(start.year, start.month + 1, 1, tzinfo=_VIENNA)
+        seconds = (
+            next_month.astimezone(timezone.utc)
+            - month_start.astimezone(timezone.utc)
+        ).total_seconds()
+        return Decimal(str(seconds / 3600))
+
+    @classmethod
+    def _hour_cost(
+        cls, start: datetime, energy_kwh: float, tariff: TariffPeriod
+    ) -> Decimal:
+        """Calculate energy + prorated monthly base price for one hour."""
+        energy = Decimal(str(energy_kwh)) * tariff.energy_price
+        base = tariff.base_price_month / cls._hours_in_month(start)
+        return energy + base
 
     @staticmethod
     def _aggregate_hourly(readings) -> dict[datetime, float]:

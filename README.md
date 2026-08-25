@@ -21,22 +21,27 @@ Zusätzliche Gerätesensoren:
 
 Die Kostenstatistik bedeutet ausdrücklich:
 
-**Energiekosten inkl. Grundpreis, exkl. Netzgebühren und Abgaben.**
+**Energiekosten inkl. konfiguriertem Grundpreis, exkl. Netzgebühren und Abgaben.**
 
 Netzgebühren, Steuern und Abgaben werden nicht geschätzt und nicht als pauschale Werte hinterlegt.
 
 ## Tarifhistorie
 
-Kosten werden immer mit der zum jeweiligen Verbrauchszeitpunkt gültigen Tarifperiode berechnet. Ein aktueller Preis wird nicht rückwirkend auf historische Verbrauchsdaten angewendet.
+Tarifdaten sind **installations- und vertragsabhängig**. Dieses öffentliche Repository enthält bewusst keine Anbieter-, Vertrags- oder kundenspezifischen Tarifdefaults.
 
-Die bestätigte Standard-Tarifhistorie dieser Installation ist:
+Die Integration unterstützt eine frei konfigurierbare Tarifhistorie. Nutzer müssen ihre eigenen Vertragsdaten prüfen und in den Integrationsoptionen hinterlegen. Ein aktueller Tarif wird nicht rückwirkend auf frühere Zeiträume angewendet; jede Verbrauchsstunde wird mit der zu diesem Zeitpunkt gültigen Tarifperiode berechnet.
 
-| gültig ab | Anbieter / Tarif | Arbeitspreis | Grundpreis |
-| --- | --- | ---: | ---: |
-| 24.12.2024 | E.ON Energie Österreich – historischer Tarif | 0,264 EUR/kWh | 5,40 EUR/Monat |
-| 01.10.2025 | E.ON Energie Österreich – E.ON ÖkoStrom Treue | 0,152388 EUR/kWh | 2,754 EUR/Monat |
+Eine Tarifperiode verwendet logisch folgende Felder:
 
-Die Tarifhistorie kann in den Integrationsoptionen als JSON angepasst oder erweitert werden. Für andere Installationen müssen die dort hinterlegten Standardwerte vor Nutzung der Kostenstatistik geprüft und angepasst werden.
+```text
+valid_from: YYYY-MM-DD
+energy_price: individueller Arbeitspreis in EUR/kWh
+base_price_month: individueller Grundpreis in EUR/Monat
+provider: optionaler Anbietername
+name: optionaler Tarifname
+```
+
+Ist keine Tarifhistorie konfiguriert, funktioniert der Verbrauchsimport weiterhin. Kostenstatistik und der Sensor „Kosten gestern“ bleiben dann ohne berechenbaren Wert, bis eigene Tarifdaten hinterlegt wurden.
 
 ### Grundpreis-Verteilung
 
@@ -76,15 +81,20 @@ Dafür werden bewusst nicht für jede Kennzahl zusätzliche Template-Sensoren er
 4. `LINZ Netz Energy` installieren bzw. aktualisieren.
 5. Home Assistant neu starten.
 6. Unter **Einstellungen → Geräte & Dienste** die Integration hinzufügen bzw. nach einem Update neu laden.
-7. Für einen größeren Historienimport die Integrationsoptionen öffnen und den einmaligen Backfill aktivieren.
+7. Eigene Tarifdaten in den Integrationsoptionen hinterlegen, wenn die Kostenstatistik genutzt werden soll.
+8. Für einen größeren Historienimport die Integrationsoptionen öffnen und den einmaligen Backfill aktivieren.
 
-## Sicherheit
+## Sicherheit und Datenschutz
 
-Keine Zugangsdaten, Cookies, Session-Werte, Tokens, ViewState-Werte, Zählpunktnummern oder Meter-IDs gehören in dieses Repository oder in Issues/Logs. Zugangsdaten werden ausschließlich lokal in Home Assistant eingegeben.
+Zugangsdaten bleiben lokal in Home Assistant. Keine Zugangsdaten, Cookies, Session-Werte, Tokens, ViewState-Werte, Zählpunktnummern, Meter-IDs, Kundennummern oder persönliche Portalexporte gehören in dieses Repository, in Issues oder Logs.
+
+Lokale Debug-Dumps, HAR-Dateien, Portalantworten und Session-Dateien sollen ebenfalls nicht committed werden; entsprechende typische Dateinamen und Verzeichnisse sind über `.gitignore` ausgeschlossen.
 
 ## Technischer Hinweis
 
 Der Zugriff verwendet den beobachteten LINZ-NETZ-Webportal-Flow mit SSO sowie JSF-/PrimeFaces-Formularen und -Paginierung. Es wird keine nicht bestätigte öffentliche API behauptet oder erfunden.
+
+Da dieses Repository gezielt eine Integration für LINZ NETZ bereitstellt, sind der Dienstname und der technische Portal-Endpunkt Bestandteil des Integrationscodes. Sie sind keine privaten Hausdaten. Das Verbergen dieser Zielplattform würde die Integration nicht sicherer machen und wäre mit dem Zweck eines öffentlichen Community-Repositories nicht vereinbar.
 
 ## Haftung
 

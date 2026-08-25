@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "LINZ NETZ Energy",
+        "description": "Verbindet das LINZ-NETZ-Serviceportal und importiert verzögerte Verbrauchswerte als Home-Assistant-Statistik.",
+        "data": {
+          "username": "Benutzername / E-Mail",
+          "password": "Passwort",
+          "backfill_days": "Historie beim ersten Import (Tage)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Anmeldung abgelehnt.",
+      "cannot_connect": "LINZ NETZ ist nicht erreichbar oder das Portalformat wurde geändert.",
+      "unknown": "Unerwarteter Fehler."
+    },
+    "abort": {
+      "already_configured": "LINZ NETZ Energy ist bereits eingerichtet."
+    }
+  }
+}

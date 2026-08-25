@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta
 import logging
+import math
 from zoneinfo import ZoneInfo
 
 from homeassistant.components.recorder import get_instance
@@ -16,6 +17,7 @@ from homeassistant.components.recorder.models import (
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
@@ -76,7 +78,7 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             1,
             STATISTIC_ID,
             True,
-            set(),
+            {"state", "sum"},
         )
 
         yesterday = datetime.now(_VIENNA).date() - timedelta(days=1)
@@ -95,12 +97,11 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                 last_start.date(),
                 yesterday - timedelta(days=2),
             )
-            cumulative = float(last[STATISTIC_ID][0].get("sum") or 0.0)
-            last_timestamp = float(last[STATISTIC_ID][0]["start"])
         else:
             start_day = yesterday - timedelta(days=max(backfill_days - 1, 0))
-            cumulative = 0.0
-            last_timestamp = -1.0
+
+        first_day_start = datetime.combine(start_day, datetime.min.time(), tzinfo=_VIENNA)
+        cumulative = await self._async_get_sum_before(first_day_start)
 
         stats: list[StatisticData] = []
         imported_days = 0
@@ -116,17 +117,43 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
                 continue
 
             hourly = self._aggregate_hourly(readings)
-            day_total = sum(hourly.values())
+            hourly_total = sum(hourly.values())
+            quarter_total = sum(reading.kwh for reading in readings)
+            if not math.isclose(
+                hourly_total,
+                quarter_total,
+                rel_tol=1e-9,
+                abs_tol=1e-6,
+            ):
+                _LOGGER.warning(
+                    "LINZ NETZ Statistik-Plausibilitaet fehlgeschlagen: "
+                    "day=%s hours=%s hourly_total=%.6f quarter_total=%.6f",
+                    day,
+                    len(hourly),
+                    hourly_total,
+                    quarter_total,
+                )
+                day += timedelta(days=1)
+                continue
+
+            day_total = quarter_total
             if day == yesterday:
                 yesterday_total = day_total
 
+            _LOGGER.info(
+                "LINZ NETZ statistics day=%s hours=%s previous_sum=%.6f",
+                day,
+                len(hourly),
+                cumulative,
+            )
+
+            # Always write the complete day again. Home Assistant's external
+            # statistics importer updates an existing row when statistic_id and
+            # start timestamp already exist, so a previous partial import is
+            # corrected instead of being skipped.
             for start, value in sorted(hourly.items()):
-                ts = start.timestamp()
-                if ts <= last_timestamp:
-                    continue
                 cumulative += value
                 stats.append(StatisticData(start=start, state=value, sum=cumulative))
-                last_timestamp = ts
 
             imported_days += 1
             day += timedelta(days=1)
@@ -149,6 +176,49 @@ class LinzNetzCoordinator(DataUpdateCoordinator[dict[str, object]]):
             "new_hourly_statistics": len(stats),
             "days_checked": imported_days,
         }
+
+    async def _async_get_sum_before(self, start: datetime) -> float:
+        """Return the cumulative statistic sum immediately before ``start``.
+
+        Prefer deriving the base from an existing row at the start of the day.
+        That makes re-imports deterministic even when that day was previously
+        only partially imported. If the first row is missing, fall back to the
+        latest historical sum before the day.
+        """
+        first_hour_end = start + timedelta(hours=1)
+        current = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            start,
+            first_hour_end,
+            {STATISTIC_ID},
+            "hour",
+            None,
+            {"state", "sum"},
+        )
+        rows = current.get(STATISTIC_ID, [])
+        if rows:
+            first = rows[0]
+            if float(first.get("start", -1.0)) == start.timestamp():
+                first_sum = float(first.get("sum") or 0.0)
+                first_state = float(first.get("state") or 0.0)
+                return first_sum - first_state
+
+        history_start = datetime.fromtimestamp(0, tz=_VIENNA)
+        previous = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            history_start,
+            start,
+            {STATISTIC_ID},
+            "hour",
+            None,
+            {"sum"},
+        )
+        previous_rows = previous.get(STATISTIC_ID, [])
+        if not previous_rows:
+            return 0.0
+        return float(previous_rows[-1].get("sum") or 0.0)
 
     @staticmethod
     def _aggregate_hourly(readings) -> dict[datetime, float]:

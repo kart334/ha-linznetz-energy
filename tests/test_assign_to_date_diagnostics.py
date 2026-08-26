@@ -1,4 +1,4 @@
-"""Regression tests for 0.1.17 assignToDate AJAX diagnostics."""
+"""Regression tests for 0.1.18 assignToDate PrimeFaces diagnostics."""
 
 import importlib.util
 from pathlib import Path
@@ -33,37 +33,116 @@ _load("inline_date_handler_diagnostics")
 diag = _load("assign_to_date_diagnostics")
 
 
-def test_direct_primefaces_contract() -> None:
-    markup = """
-    <input id="myForm1:calendarToRegion" onchange="assignToDate();" />
-    <script>
-      function assignToDate() {
-        PrimeFaces.ab({s:'myForm1:calendarToRegion',p:'myForm1:calendarToRegion',u:'myForm1',e:'change',params:[{name:'rangeHelper',value:'SECRET'}]});
-      }
-    </script>
-    """
-    c = diag.assign_to_date_contract(markup)
+def _contract(js: str, *, onchange: bool = True):
+    handler = '<input id="myForm1:calendarToRegion" onchange="assignToDate();" />' if onchange else ""
+    return diag.assign_to_date_contract(
+        f"""{handler}<script>function assignToDate() {{{js}}}</script>"""
+    )
+
+
+def test_primefaces_short_keys_are_mapped_and_listed() -> None:
+    c = _contract(
+        "PrimeFaces.ab({s:'myForm1:To',p:'myForm1:To',u:'myForm1:list',e:'change',pa:[{name:'foo',value:'SECRET'}]});"
+    )
     assert c["ajax"] is True
     assert c["ajax_type"] == "PrimeFaces.ab"
     assert c["ajax_direct"] is True
-    assert c["source"] == "myForm1:calendarToRegion"
-    assert c["execute"] == "myForm1:calendarToRegion"
-    assert c["render"] == "myForm1"
+    assert c["primefaces_keys"] == ["s", "p", "u", "e", "pa"]
+    assert c["source"] == "myForm1:To"
+    assert c["execute"] == "myForm1:To"
+    assert c["render"] == "myForm1:list"
     assert c["event"] == "change"
-    assert c["param_names"] == ["rangeHelper"]
+    assert c["params_present"] is True
+    assert c["param_names"] == ["foo"]
     assert "SECRET" not in repr(c)
 
 
-def test_direct_jsf_ajax_request_contract() -> None:
+def test_spelled_out_keys_are_mapped() -> None:
+    c = _contract(
+        "PrimeFaces.ab({source:'Src',process:'Proc',update:'Upd',event:'Evt',params:[{name:'bar',value:'NOPE'}]});"
+    )
+    assert c["primefaces_keys"] == ["source", "process", "update", "event", "params"]
+    assert c["source"] == "Src"
+    assert c["execute"] == "Proc"
+    assert c["render"] == "Upd"
+    assert c["event"] == "Evt"
+    assert c["param_names"] == ["bar"]
+    assert "NOPE" not in repr(c)
+
+
+def test_missing_execute_and_event_are_explicit() -> None:
+    c = _contract("PrimeFaces.ab({s:'Src',u:'Upd'});")
+    assert c["execute_present"] is False
+    assert c["execute"] is None
+    assert c["execute_dynamic"] is False
+    assert c["event_present"] is False
+    assert c["event"] is None
+    assert c["event_dynamic"] is False
+
+
+def test_static_source_preserves_exact_case() -> None:
+    c = _contract("PrimeFaces.ab({s:'myform:j_idt1320'});")
+    assert c["source_present"] is True
+    assert c["source_kind"] == "static_string"
+    assert c["source"] == "myform:j_idt1320"
+    assert c["source_dynamic"] is False
+
+
+def test_dynamic_source_is_not_logged_as_expression() -> None:
+    c = _contract("PrimeFaces.ab({s:widget.sourceId,u:'myForm1'});")
+    assert c["source_present"] is True
+    assert c["source_kind"] == "property_access"
+    assert c["source"] is None
+    assert c["source_dynamic"] is True
+    assert "widget.sourceId" in c["source_refs"]
+    assert "widget.sourceId" not in str(c["source"])
+
+
+def test_render_function_call_is_classified_without_expression() -> None:
+    c = _contract("PrimeFaces.ab({s:'Src',u:getRenderTarget(componentId)});")
+    assert c["render_present"] is True
+    assert c["render_kind"] == "function_call"
+    assert c["render"] is None
+    assert c["render_dynamic"] is True
+    assert "getRenderTarget" in c["render_functions"]
+    assert "componentId" in c["render_refs"]
+
+
+def test_render_array_is_classified_without_values() -> None:
+    c = _contract("PrimeFaces.ab({s:'Src',u:[targetOne,targetTwo]});")
+    assert c["render_present"] is True
+    assert c["render_kind"] == "array"
+    assert c["render"] is None
+    assert c["render_dynamic"] is True
+    assert "targetOne" in c["render_refs"]
+    assert "targetTwo" in c["render_refs"]
+
+
+def test_concatenation_and_ternary_are_classified() -> None:
+    c = _contract("PrimeFaces.ab({s:prefix + suffix,u:flag ? targetA : targetB});")
+    assert c["source_kind"] == "concatenation"
+    assert c["render_kind"] == "ternary"
+    assert c["source"] is None and c["render"] is None
+
+
+def test_wrapper_function_is_still_followed() -> None:
     markup = """
+    <input id="myForm1:calendarToRegion" onchange="assignToDate();" />
     <script>
-      function assignToDate() {
-        jsf.ajax.request('myForm1:calendarToRegion', 'change', {execute:'@this',render:'myForm1'});
-      }
+      function assignToDate() { helper(); }
+      function helper() { PrimeFaces.ab({s:'to',u:'myForm1'}); }
     </script>
     """
     c = diag.assign_to_date_contract(markup)
     assert c["ajax"] is True
+    assert c["ajax_via_function"] == "helper"
+    assert c["source"] == "to"
+
+
+def test_direct_jsf_ajax_support_is_preserved() -> None:
+    c = _contract(
+        "jsf.ajax.request('myForm1:calendarToRegion','change',{execute:'@this',render:'myForm1'});"
+    )
     assert c["ajax_type"] == "jsf.ajax.request"
     assert c["source"] == "myForm1:calendarToRegion"
     assert c["execute"] == "@this"
@@ -71,81 +150,30 @@ def test_direct_jsf_ajax_request_contract() -> None:
     assert c["event"] == "change"
 
 
-def test_wrapper_function_is_followed() -> None:
-    markup = """
-    <script>
-      function assignToDate() { updateToDate(); }
-      function updateToDate() {
-        PrimeFaces.ab({s:'to',p:'to',u:'myForm1',e:'change'});
-      }
-    </script>
-    """
-    c = diag.assign_to_date_contract(markup)
-    assert c["ajax"] is True
-    assert c["ajax_type"] == "PrimeFaces.ab"
-    assert c["ajax_direct"] is True
-    assert c["ajax_via_function"] == "updateToDate"
-    assert "updateToDate" in c["calls"]
-
-
-def test_nested_multiline_and_braces_in_strings() -> None:
-    markup = """
-    <script>
-      function assignToDate() {
-        if (true) {
-          const text = "fake }) and ajax text";
-          helper();
-        }
-      }
-      function helper() {
-        const x = "}";
-        PrimeFaces.ab({
-          s: 'to',
-          p: 'to',
-          u: 'myForm1',
-          e: 'change'
-        });
-      }
-    </script>
-    """
-    c = diag.assign_to_date_contract(markup)
-    assert c["ajax"] is True
-    assert c["source"] == "to"
-    assert c["render"] == "myForm1"
-
-
-def test_dynamic_contract_values_are_not_guessed() -> None:
-    markup = """
-    <script>
-      function assignToDate() {
-        PrimeFaces.ab({s:sourceVar,p:getExecute(),u:targetVar,e:eventName});
-      }
-    </script>
-    """
-    c = diag.assign_to_date_contract(markup)
-    assert c["source"] is None and c["source_dynamic"] is True
-    assert c["execute"] is None and c["execute_dynamic"] is True
-    assert c["render"] is None and c["render_dynamic"] is True
-    assert c["event"] is None and c["event_dynamic"] is True
-    assert "sourceVar" in c["source_refs"]
-    assert "targetVar" in c["render_refs"]
-
-
-def test_ajax_word_without_real_call_is_false_positive_free() -> None:
-    markup = """
-    <script>
-      function assignToDate() {
-        const ajax = 'PrimeFaces.ab is documentation only';
-        const note = 'jsf.ajax.request';
-      }
-    </script>
-    """
-    c = diag.assign_to_date_contract(markup)
+def test_false_positive_text_is_not_ajax() -> None:
+    c = _contract("const note = 'PrimeFaces.ab({s:fake}) ajax jsf.ajax.request';")
     assert c["ajax"] is False
     assert c["ajax_type"] is None
 
 
-def test_local_copy_and_hidden_field_are_structural_only() -> None:
+def test_nested_blocks_and_parentheses_in_strings_are_safe() -> None:
+    markup = """
+    <script>
+      function assignToDate() {
+        if (true) { const x = "}),({ not structure"; helper(); }
+      }
+      function helper() {
+        PrimeFaces.ab({s:'Src',u:getTarget("}),({")});
+      }
+    </script>
+    """
+    c = diag.assign_to_date_contract(markup)
+    assert c["ajax"] is True
+    assert c["source"] == "Src"
+    assert c["render_kind"] == "function_call"
+
+
+def test_local_copy_hidden_and_called_by_remain_structural_only() -> None:
     markup = """
     <form>
       <input id="myForm1:calendarFromRegion" />
@@ -160,21 +188,15 @@ def test_local_copy_and_hidden_field_are_structural_only() -> None:
     </form>
     """
     c = diag.assign_to_date_contract(markup)
-    assert c["ajax"] is False
-    assert c["copies"] == [{"from":"myForm1:calendarFromRegion","to":"myForm1:calendarToRegion"}]
+    assert c["copies"] == [{"from": "myForm1:calendarFromRegion", "to": "myForm1:calendarToRegion"}]
     assert c["hidden_fields"] == ["myForm1:rangeHelper"]
     assert c["called_by"] == ["myForm1:calendarToRegion"]
     assert "SUPER-SECRET-VALUE" not in repr(c)
 
 
 def test_sensitive_field_names_are_redacted() -> None:
-    markup = """
-    <script>
-      function assignToDate() {
-        document.getElementById('customerToken').value = document.getElementById('myForm1:calendarFromRegion').value;
-      }
-    </script>
-    """
-    c = diag.assign_to_date_contract(markup)
+    c = _contract(
+        "document.getElementById('customerToken').value = document.getElementById('myForm1:calendarFromRegion').value;"
+    )
     assert "customerToken" not in repr(c)
     assert "<redacted-field>" in c["writes"]

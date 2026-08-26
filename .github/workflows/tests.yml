@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/assign-to-date-ajax-0.1.17
+      - diagnostic/primefaces-options-0.1.18
 
 jobs:
   test:

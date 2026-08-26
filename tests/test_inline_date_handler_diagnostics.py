@@ -87,7 +87,8 @@ def test_to_onchange_without_primefaces_is_distinguished_and_function_names_only
     assert contract["primefaces_ajax"] is False
     assert contract["source"] is None
     assert contract["function_calls"] == ["syncDateRange", "validateRange"]
-    assert "this" not in repr(contract)
+    assert contract["param_names"] == []
+    assert contract["pre_ajax_assignments"] == []
 
 
 def test_direct_date_inputs_and_ddmmyyyy_are_preserved() -> None:

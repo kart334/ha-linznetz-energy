@@ -15,7 +15,7 @@ from .api import LinzNetzClient
 from .backfill import migrate_legacy_backfill_options
 from .coordinator import LinzNetzCoordinator
 from .const import DOMAIN
-from .diagnostics import DiagnosticSessionProxy
+from .date_contract_diagnostics import DateContractDiagnosticSessionProxy
 
 PLATFORMS = ["sensor"]
 _LOGGER = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up LINZ NETZ Energy from a config entry."""
     session = async_create_clientsession(hass, cookie_jar=CookieJar())
-    diagnostic_session = DiagnosticSessionProxy(session)
+    diagnostic_session = DateContractDiagnosticSessionProxy(session)
     client = LinzNetzClient(
         diagnostic_session,
         entry.data[CONF_USERNAME],

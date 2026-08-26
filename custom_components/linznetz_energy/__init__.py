@@ -11,7 +11,7 @@ from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
-from .assign_to_date_diagnostics import AssignToDateDiagnosticSessionProxy
+from .assign_to_date_detail_diagnostics import AssignToDateDetailDiagnosticSessionProxy
 from .backfill import migrate_legacy_backfill_options
 from .browser_contract_client import BrowserContractLinzNetzClient
 from .coordinator import LinzNetzCoordinator
@@ -24,7 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up LINZ NETZ Energy from a config entry."""
     session = async_create_clientsession(hass, cookie_jar=CookieJar())
-    diagnostic_session = AssignToDateDiagnosticSessionProxy(session)
+    diagnostic_session = AssignToDateDetailDiagnosticSessionProxy(session)
     client = BrowserContractLinzNetzClient(
         diagnostic_session,
         entry.data[CONF_USERNAME],

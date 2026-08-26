@@ -28,6 +28,10 @@ _DATE_INPUT_SUFFIX_RE: Final = re.compile(r"_input$", re.IGNORECASE)
 _PRIMEFACES_AJAX_RE: Final = re.compile(
     r"PrimeFaces\.ab\(\s*\{(.*?)\}\s*(?:,|\))", re.DOTALL
 )
+_PARTIAL_UPDATE_RE: Final = re.compile(
+    r'<update\s+id=["\']([^"\']+)["\']\s*>\s*<!\[CDATA\[(.*?)\]\]>\s*</update>',
+    re.DOTALL,
+)
 
 
 class LinzNetzError(Exception):
@@ -169,11 +173,11 @@ class LinzNetzClient:
                 form_id, quarter, view_state_name, view_state_value
             )
             view_state_value = self._extract_partial_view_state(stage) or view_state_value
+            working_form = self._merge_partial_response_form(
+                working_form, form_id, stage
+            )
             stage_soup = self._partial_response_soup(stage)
             behavior_soups.insert(0, stage_soup)
-            stage_form = self._find_consumption_form(stage_soup)
-            if stage_form is not None:
-                working_form = stage_form
             kwh = self._find_choice_field(working_form, "KWH", _KWH_TEXT_RE)
             if kwh is None:
                 kwh = self._find_choice_field(stage_soup, "KWH", _KWH_TEXT_RE)
@@ -214,29 +218,27 @@ class LinzNetzClient:
         button_id = str(button.get("id"))
         day_text = day.strftime("%d.%m.%Y")
 
-        # A browser normally lets the PrimeFaces DatePicker update the server-side
-        # model before clicking "Anzeigen". If no explicit DatePicker AJAX behavior
-        # can be discovered, process the whole form on the display request instead
-        # of merely posting date strings while executing only the button.
-        payload = self._collect_form_payload(working_form)
-        payload.update(
-            {
-                "jakarta.faces.partial.ajax": "true",
-                "jakarta.faces.source": button_id,
-                "jakarta.faces.partial.execute": button_id if date_ajax_complete else "@form",
-                "jakarta.faces.partial.render": self._find_render_target(
-                    working_form, form_id
-                ),
-                "jakarta.faces.behavior.event": "action",
-                "jakarta.faces.partial.event": "click",
-                form_id: form_id,
-                quarter.name: quarter.value,
-                str(date_from.get("name")): day_text,
-                str(date_to.get("name")): day_text,
-                kwh.name: kwh.value,
-                view_state_name: view_state_value,
-            }
+        # Always process the current merged form. 0.1.10 could execute only the
+        # button after successful DatePicker AJAX, while the client still held a
+        # stale DOM snapshot. That allowed updated component/hidden state from
+        # Partial Responses to be skipped and could leave the result table empty.
+        payload = self._build_display_payload(
+            working_form,
+            form_id,
+            button_id,
+            date_from,
+            date_to,
+            quarter,
+            kwh,
+            day_text,
+            view_state_name,
+            view_state_value,
         )
+        if date_ajax_complete:
+            _LOGGER.debug(
+                "LINZ NETZ Datumsauswahl serverseitig per PrimeFaces-AJAX verarbeitet: requested=%s",
+                day.isoformat(),
+            )
         period = working_form.find(
             "input", attrs={"name": re.compile(r"periodRange$", re.IGNORECASE)}
         )
@@ -259,6 +261,12 @@ class LinzNetzClient:
         result.raise_for_status()
         body = await result.text()
         first_page = self._parse_readings(body)
+        _LOGGER.debug(
+            "LINZ NETZ Tabellenantwort: requested=%s rows=%s returned_days=%s",
+            day.isoformat(),
+            len(first_page),
+            sorted({reading.start_local.date().isoformat() for reading in first_page}),
+        )
         if not first_page:
             raise LinzNetzParseError(
                 f"Keine Viertelstundenwerte für {day_text} gefunden"
@@ -388,6 +396,14 @@ class LinzNetzClient:
                 view_state_name,
                 current_view_state,
             )
+            _LOGGER.debug(
+                "LINZ NETZ DatePicker-AJAX: requested=%s source=%s event=%s execute=%s render=%s",
+                requested_day.isoformat(),
+                behavior.source,
+                behavior.event,
+                behavior.execute,
+                behavior.render,
+            )
             result = await self._session.post(
                 PORTAL_URL,
                 data=payload,
@@ -399,17 +415,24 @@ class LinzNetzClient:
             )
             result.raise_for_status()
             body = await result.text()
+            updates = self._parse_partial_updates(body)
+            _LOGGER.debug(
+                "LINZ NETZ Partial Response: requested=%s updates=%s ids=%s",
+                requested_day.isoformat(),
+                len(updates),
+                self._safe_partial_update_ids(updates),
+            )
             current_view_state = (
                 self._extract_partial_view_state(body) or current_view_state
             )
+            current_form = self._merge_partial_response_form(
+                current_form, form_id, body
+            )
+            self._verify_rendered_day_if_present(
+                current_form, pattern, requested_day
+            )
             updated_soup = self._partial_response_soup(body)
-            updated_form = self._find_consumption_form(updated_soup)
-            if updated_form is not None:
-                current_form = updated_form
-                self._verify_rendered_day_if_present(
-                    current_form, pattern, requested_day
-                )
-                behavior_soups.insert(0, updated_soup)
+            behavior_soups.insert(0, updated_soup)
 
         return current_view_state, current_form, all_ajaxed
 
@@ -496,6 +519,40 @@ class LinzNetzClient:
         )
         return payload
 
+    @classmethod
+    def _build_display_payload(
+        cls,
+        form: Tag,
+        form_id: str,
+        button_id: str,
+        date_from: Tag,
+        date_to: Tag,
+        quarter: ChoiceField,
+        kwh: ChoiceField,
+        day_text: str,
+        view_state_name: str,
+        view_state_value: str,
+    ) -> dict[str, str]:
+        """Build final display request from the latest merged JSF form state."""
+        payload = cls._collect_form_payload(form)
+        payload.update(
+            {
+                "jakarta.faces.partial.ajax": "true",
+                "jakarta.faces.source": button_id,
+                "jakarta.faces.partial.execute": "@form",
+                "jakarta.faces.partial.render": cls._find_render_target(form, form_id),
+                "jakarta.faces.behavior.event": "action",
+                "jakarta.faces.partial.event": "click",
+                form_id: form_id,
+                quarter.name: quarter.value,
+                str(date_from.get("name")): day_text,
+                str(date_to.get("name")): day_text,
+                kwh.name: kwh.value,
+                view_state_name: view_state_value,
+            }
+        )
+        return payload
+
     @staticmethod
     def _verify_rendered_day_if_present(
         form: Tag, pattern: re.Pattern[str], requested_day: date
@@ -533,6 +590,55 @@ class LinzNetzClient:
             else:
                 payload[name] = tag.get_text()
         return payload
+
+    @staticmethod
+    def _parse_partial_updates(body: str) -> dict[str, str]:
+        """Parse all JSF Partial Response updates without exposing their values."""
+        return {match.group(1): match.group(2) for match in _PARTIAL_UPDATE_RE.finditer(body)}
+
+    @staticmethod
+    def _safe_partial_update_ids(updates: dict[str, str]) -> list[str]:
+        """Return update IDs only; never log update contents or ViewState values."""
+        return [key[:160] for key in updates][:30]
+
+    @classmethod
+    def _merge_partial_response_form(
+        cls, form: Tag, form_id: str, body: str
+    ) -> Tag:
+        """Apply relevant JSF Partial Response component updates to a form snapshot."""
+        updates = cls._parse_partial_updates(body)
+        snapshot = BeautifulSoup(str(form), "html.parser")
+        current = snapshot.find("form")
+        if current is None:
+            raise LinzNetzParseError("Verbrauchsformular konnte nicht fortgeschrieben werden")
+
+        for update_id, html in updates.items():
+            if _VIEW_STATE_RE.search(update_id):
+                continue
+            fragment_soup = BeautifulSoup(html, "html.parser")
+
+            if update_id == form_id:
+                replacement_form = fragment_soup.find("form", id=form_id)
+                if replacement_form is None:
+                    replacement_form = fragment_soup.find("form")
+                if replacement_form is not None:
+                    current = replacement_form
+                    continue
+
+            target = current.find(id=update_id)
+            replacement = fragment_soup.find(id=update_id)
+            if target is not None and replacement is not None:
+                target.replace_with(replacement)
+                continue
+
+            # Some JSF renderers update a region whose CDATA contains only the
+            # region's inner markup. Keep the wrapper and replace its children.
+            if target is not None and replacement is None:
+                target.clear()
+                for child in list(fragment_soup.contents):
+                    target.append(child.extract())
+
+        return current
 
     @staticmethod
     def _build_pagination_payload(
@@ -623,7 +729,10 @@ class LinzNetzClient:
 
     @staticmethod
     def _partial_response_soup(body: str) -> BeautifulSoup:
-        parts = re.findall(r"<!\[CDATA\[(.*?)\]\]>", body, flags=re.DOTALL)
+        updates = LinzNetzClient._parse_partial_updates(body)
+        parts = [value for key, value in updates.items() if not _VIEW_STATE_RE.search(key)]
+        if not parts:
+            parts = re.findall(r"<!\[CDATA\[(.*?)\]\]>", body, flags=re.DOTALL)
         return BeautifulSoup("\n".join(parts) if parts else body, "html.parser")
 
     @staticmethod

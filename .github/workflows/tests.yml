@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/primefaces-date-selection
+      - diagnostic/browser-contract-0.1.12
 
 jobs:
   test:
@@ -24,6 +24,7 @@ jobs:
             custom_components/linznetz_energy/api.py \
             custom_components/linznetz_energy/backfill.py \
             custom_components/linznetz_energy/config_flow.py \
-            custom_components/linznetz_energy/coordinator.py
+            custom_components/linznetz_energy/coordinator.py \
+            custom_components/linznetz_energy/diagnostics.py
       - name: Run regression tests
         run: pytest -q tests

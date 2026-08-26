@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/browser-date-state-0.1.15
+      - diagnostic/assign-to-date-0.1.16
 
 jobs:
   test:
@@ -22,6 +22,7 @@ jobs:
           python -m py_compile \
             custom_components/linznetz_energy/__init__.py \
             custom_components/linznetz_energy/api.py \
+            custom_components/linznetz_energy/assign_to_date_diagnostics.py \
             custom_components/linznetz_energy/backfill.py \
             custom_components/linznetz_energy/browser_contract_client.py \
             custom_components/linznetz_energy/config_flow.py \

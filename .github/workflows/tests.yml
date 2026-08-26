@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/date-contract-0.1.13
+      - diagnostic/inline-date-handler-0.1.14
 
 jobs:
   test:
@@ -26,6 +26,7 @@ jobs:
             custom_components/linznetz_energy/config_flow.py \
             custom_components/linznetz_energy/coordinator.py \
             custom_components/linznetz_energy/diagnostics.py \
-            custom_components/linznetz_energy/date_contract_diagnostics.py
+            custom_components/linznetz_energy/date_contract_diagnostics.py \
+            custom_components/linznetz_energy/inline_date_handler_diagnostics.py
       - name: Run regression tests
         run: pytest -q tests

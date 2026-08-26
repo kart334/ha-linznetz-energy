@@ -73,10 +73,14 @@ def _parse_options(config: str) -> dict[str, str]:
     return result
 
 
-def _param_names(config: str) -> list[str]:
-    """Extract parameter names only, never parameter values."""
+def _param_names(handler_tail: str) -> list[str]:
+    """Extract parameter names only, never parameter values.
+
+    Use the complete tail beginning at PrimeFaces.ab rather than the shallow
+    object regex capture so nested params arrays cannot truncate the scan.
+    """
     names: list[str] = []
-    for match in _PARAM_NAME_RE.finditer(config):
+    for match in _PARAM_NAME_RE.finditer(handler_tail[:4000]):
         name = _safe_token(match.group(1) or match.group(2))
         if name and name not in names:
             names.append(name)
@@ -98,12 +102,7 @@ def _pre_ajax_assignments(handler: str, ajax_start: int) -> list[str]:
 def _safe_function_calls(handler: str) -> list[str]:
     """Return only non-framework function names; never source text or args."""
     result: list[str] = []
-    blocked = {
-        "PrimeFaces.ab",
-        "document.getElementById",
-        "$",
-        "jQuery",
-    }
+    blocked = {"PrimeFaces.ab", "document.getElementById", "$", "jQuery"}
     for match in _FUNCTION_CALL_RE.finditer(handler):
         name = match.group(1)
         if name in blocked or name.startswith("PrimeFaces."):
@@ -150,12 +149,9 @@ def inline_handler_contract(control: Tag, event_attr: str = "onchange") -> dict[
 
     match = _PRIMEFACES_AB_RE.search(handler)
     if match is None:
-        related = [
-            name
-            for name in ("calendarFromRegion", "calendarToRegion")
-            if name in handler
+        base["related_controls"] = [
+            name for name in ("calendarFromRegion", "calendarToRegion") if name in handler
         ]
-        base["related_controls"] = related
         return base
 
     options = _parse_options(match.group(1))
@@ -178,12 +174,10 @@ def inline_handler_contract(control: Tag, event_attr: str = "onchange") -> dict[
             "execute": _safe_target_expression(execute),
             "render": _safe_target_expression(render),
             "event": (event or "")[:40] or None,
-            # Record only an explicitly discoverable PrimeFaces event. Do not infer
-            # javax/jakarta.faces.partial.event when it is not present in markup.
             "partial_event": None,
             "execute_flags": _selector_flags(execute, identifier),
             "related_controls": related,
-            "param_names": _param_names(match.group(1)),
+            "param_names": _param_names(handler[match.start() :]),
             "pre_ajax_assignments": _pre_ajax_assignments(handler, match.start()),
         }
     )

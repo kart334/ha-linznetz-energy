@@ -59,13 +59,17 @@ def test_from_onchange_primefaces_contract_is_extracted_without_values() -> None
 
     assert contract["primefaces_ajax"] is True
     assert contract["source"] == "myForm1:calendarFromRegion"
-    assert contract["execute"] == "myForm1:calendarFromRegion myForm1:calendarToRegion" or contract["execute"] == "<non-component>"
+    assert contract["execute"] == "myForm1:calendarFromRegion myForm1:calendarToRegion"
     assert contract["render"] == "myForm1:list"
     assert contract["event"] == "change"
+    assert contract["execute_flags"]["contains_from"] is True
+    assert contract["execute_flags"]["contains_to"] is True
+    assert contract["execute_flags"]["uses_form"] is False
     assert "calendarFromRegion" in contract["related_controls"]
     assert "calendarToRegion" in contract["related_controls"]
     assert "myForm1:calendarFromRegion" in contract["param_names"]
     assert "myForm1:calendarToRegion" in contract["param_names"]
+    assert "myForm1:calendarToRegion" in contract["pre_ajax_assignments"]
     assert "SECRET-DATE" not in repr(contract)
 
 
@@ -159,5 +163,6 @@ def test_sensitive_handler_values_are_never_returned() -> None:
     contract = inline_diag.inline_handler_contract(control)
 
     assert contract["execute"] == "@this"
+    assert contract["execute_flags"]["uses_this"] is True
     assert contract["param_names"] == ["safeParam"]
     assert "customer-123-secret" not in repr(contract)

@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/inline-date-handler-0.1.14
+      - fix/browser-date-state-0.1.15
 
 jobs:
   test:
@@ -16,13 +16,14 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install test dependencies
-        run: python -m pip install pytest aiohttp beautifulsoup4==4.13.4
+        run: python -m pip install pytest pytest-asyncio aiohttp beautifulsoup4==4.13.4
       - name: Compile changed integration modules
         run: |
           python -m py_compile \
             custom_components/linznetz_energy/__init__.py \
             custom_components/linznetz_energy/api.py \
             custom_components/linznetz_energy/backfill.py \
+            custom_components/linznetz_energy/browser_contract_client.py \
             custom_components/linznetz_energy/config_flow.py \
             custom_components/linznetz_energy/coordinator.py \
             custom_components/linznetz_energy/diagnostics.py \

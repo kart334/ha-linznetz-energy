@@ -28,8 +28,12 @@ _FUNCTION_DEF_RE: Final = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\([^)]*\)\s*=>)\s*\{",
     re.IGNORECASE | re.MULTILINE,
 )
-_GET_BY_ID_RE: Final = re.compile(r"document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)", re.I)
-_GET_BY_NAME_RE: Final = re.compile(r"document\.getElementsByName\(\s*['\"]([^'\"]+)['\"]\s*\)", re.I)
+_GET_BY_ID_RE: Final = re.compile(
+    r"document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)", re.I
+)
+_GET_BY_NAME_RE: Final = re.compile(
+    r"document\.getElementsByName\(\s*['\"]([^'\"]+)['\"]\s*\)", re.I
+)
 _JQUERY_ID_RE: Final = re.compile(r"(?:\$|jQuery)\(\s*['\"]#([^'\"]+)['\"]\s*\)")
 
 
@@ -42,7 +46,9 @@ def _safe_name(value: str | None) -> str | None:
     return value if _SAFE_NAME_RE.fullmatch(value) else "<non-component>"
 
 
-def _balanced_segment(text: str, start: int, open_ch: str, close_ch: str) -> tuple[str | None, int]:
+def _balanced_segment(
+    text: str, start: int, open_ch: str, close_ch: str
+) -> tuple[str | None, int]:
     depth = 0
     quote: str | None = None
     escaped = False
@@ -103,7 +109,7 @@ def _script_functions(markup: str) -> tuple[dict[str, str], BeautifulSoup]:
         if not text:
             continue
         for match in _FUNCTION_DEF_RE.finditer(text):
-            name = next((g for g in match.groups() if g), None)
+            name = next((group for group in match.groups() if group), None)
             if not name:
                 continue
             brace = text.find("{", match.start(), match.end() + 1)
@@ -127,7 +133,9 @@ def _field_accesses(body: str) -> tuple[list[str], list[str]]:
             is_write = bool(
                 re.match(r"\s*\.value(?:AsDate)?\s*=", tail)
                 or re.match(r"\s*\.val\s*\([^)]", tail)
-                or re.match(r"\s*\.setAttribute\s*\(\s*['\"]value['\"]\s*,", tail, re.I)
+                or re.match(
+                    r"\s*\.setAttribute\s*\(\s*['\"]value['\"]\s*,", tail, re.I
+                )
             )
             target = writes if is_write else reads
             if name not in target:
@@ -137,8 +145,14 @@ def _field_accesses(body: str) -> tuple[list[str], list[str]]:
 
 def _calls(body: str) -> list[str]:
     blocked = {
-        "document.getElementById", "document.getElementsByName", "document.querySelector",
-        "PrimeFaces.ab", "jsf.ajax.request", "faces.ajax.request", "$", "jQuery",
+        "document.getElementById",
+        "document.getElementsByName",
+        "document.querySelector",
+        "PrimeFaces.ab",
+        "jsf.ajax.request",
+        "faces.ajax.request",
+        "$",
+        "jQuery",
     }
     result: list[str] = []
     for match in _CALL_RE.finditer(body):
@@ -151,15 +165,25 @@ def _calls(body: str) -> list[str]:
     return result[:20]
 
 
-def _split_top_level_args(text: str) -> list[str]:
-    args: list[str] = []
+def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
+    parts: list[str] = []
     start = 0
-    depth = 0
+    stack: list[str] = []
     quote: str | None = None
     escaped = False
+    line_comment = False
+    block_comment = False
     pairs = {"(": ")", "{": "}", "[": "]"}
-    closers = set(pairs.values())
     for i, ch in enumerate(text):
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if line_comment:
+            if ch in "\r\n":
+                line_comment = False
+            continue
+        if block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+            continue
         if quote is not None:
             if escaped:
                 escaped = False
@@ -170,50 +194,186 @@ def _split_top_level_args(text: str) -> list[str]:
             continue
         if ch in {"'", '"', "`"}:
             quote = ch
-        elif ch in pairs:
-            depth += 1
-        elif ch in closers:
-            depth = max(0, depth - 1)
-        elif ch == "," and depth == 0:
-            args.append(text[start:i].strip())
+            continue
+        if ch == "/" and nxt == "/":
+            line_comment = True
+            continue
+        if ch == "/" and nxt == "*":
+            block_comment = True
+            continue
+        if ch in pairs:
+            stack.append(pairs[ch])
+        elif stack and ch == stack[-1]:
+            stack.pop()
+        elif ch == delimiter and not stack:
+            parts.append(text[start:i].strip())
             start = i + 1
-    args.append(text[start:].strip())
-    return args
+    parts.append(text[start:].strip())
+    return [part for part in parts if part]
+
+
+def _split_member(member: str) -> tuple[str | None, str | None]:
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    for i, ch in enumerate(member):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in {"'", '"', "`"}:
+            quote = ch
+            continue
+        if ch in pairs:
+            stack.append(pairs[ch])
+        elif stack and ch == stack[-1]:
+            stack.pop()
+        elif ch == ":" and not stack:
+            raw_key = member[:i].strip()
+            value = member[i + 1 :].strip()
+            literal_key = _literal(raw_key)
+            key = literal_key if literal_key is not None else raw_key
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", key):
+                return key, value
+            return None, None
+    return None, None
 
 
 def _literal(expr: str) -> str | None:
-    m = re.fullmatch(r"\s*(['\"])(.*?)\1\s*", expr, re.DOTALL)
-    return m.group(2) if m else None
+    match = re.fullmatch(r"\s*(['\"])(.*?)\1\s*", expr, re.DOTALL)
+    return match.group(2) if match else None
 
 
 def _safe_expr_names(expr: str) -> list[str]:
+    stripped = re.sub(r"(['\"])(?:\\.|(?!\1).)*\1", " ", expr, flags=re.S)
     names: list[str] = []
-    for raw in re.findall(r"\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\b", expr):
-        if raw in {"true", "false", "null", "undefined"}:
+    for raw in re.findall(r"\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\b", stripped):
+        if raw in {"true", "false", "null", "undefined", "return", "function"}:
             continue
         safe = _safe_name(raw)
+        if safe and safe not in names:
+            names.append(safe)
+    return names[:12]
+
+
+def _function_names(expr: str) -> list[str]:
+    names: list[str] = []
+    for match in _CALL_RE.finditer(expr):
+        safe = _safe_name(match.group(1))
         if safe and safe not in names:
             names.append(safe)
     return names[:10]
 
 
-def _pf_options(obj: str) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in re.findall(
-        r"\b(s|source|e|event|p|process|u|update)\s*:\s*([^,}]+)", obj, re.I | re.S
-    ):
-        canon = {"s": "source", "p": "execute", "process": "execute", "u": "render", "update": "render", "e": "event"}.get(key.lower(), key.lower())
-        lit = _literal(value.strip())
-        result[canon] = _safe_name(lit) if lit is not None else None
-        result[f"{canon}_dynamic"] = lit is None
-        if lit is None:
-            result[f"{canon}_refs"] = _safe_expr_names(value)
+def _expression_kind(expr: str) -> str:
+    value = expr.strip()
+    if _literal(value) is not None:
+        return "static_string"
+    if value.startswith("[") and value.endswith("]"):
+        return "array"
+    if value.startswith("{") and value.endswith("}"):
+        return "object"
+    if "?" in value and ":" in value:
+        return "ternary"
+    if "+" in value:
+        return "concatenation"
+    if re.fullmatch(r"[A-Za-z_$][\w$]*", value):
+        return "identifier"
+    if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+", value):
+        return "property_access"
+    if re.match(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*\(", value):
+        return "function_call"
+    return "other_dynamic"
+
+
+def _parse_object_members(obj_expr: str) -> list[tuple[str, str]]:
+    value = obj_expr.strip()
+    if not (value.startswith("{") and value.endswith("}")):
+        return []
+    members: list[tuple[str, str]] = []
+    for member in _split_top_level(value[1:-1]):
+        key, expr = _split_member(member)
+        if key and expr is not None:
+            members.append((key, expr))
+    return members
+
+
+def _params_names(expr: str) -> list[str]:
     names: list[str] = []
-    for match in re.finditer(r"(?:name|n)\s*:\s*(['\"])(.*?)\1", obj, re.I | re.S):
+    for match in re.finditer(
+        r"\b(?:name|n)\s*:\s*(['\"])(.*?)\1", expr, re.IGNORECASE | re.DOTALL
+    ):
         safe = _safe_name(match.group(2))
         if safe and safe not in names:
             names.append(safe)
-    result["param_names"] = names[:20]
+    return names[:20]
+
+
+def _field_result(expr: str | None, present: bool) -> dict[str, object]:
+    if not present or expr is None:
+        return {
+            "present": False,
+            "kind": None,
+            "value": None,
+            "dynamic": False,
+            "refs": [],
+            "functions": [],
+        }
+    kind = _expression_kind(expr)
+    literal = _literal(expr)
+    static = kind == "static_string" and literal is not None
+    return {
+        "present": True,
+        "kind": kind,
+        "value": _safe_name(literal) if static else None,
+        "dynamic": not static,
+        "refs": [] if static else _safe_expr_names(expr),
+        "functions": [] if static else _function_names(expr),
+    }
+
+
+def _primefaces_options(obj_expr: str) -> dict[str, object]:
+    members = _parse_object_members(obj_expr)
+    keys = [key for key, _ in members][:40]
+    aliases = {
+        "s": "source",
+        "source": "source",
+        "p": "execute",
+        "process": "execute",
+        "execute": "execute",
+        "u": "render",
+        "update": "render",
+        "render": "render",
+        "e": "event",
+        "event": "event",
+        "pa": "params",
+        "params": "params",
+    }
+    canonical: dict[str, str] = {}
+    for key, expr in members:
+        target = aliases.get(key.lower())
+        if target and target not in canonical:
+            canonical[target] = expr
+
+    result: dict[str, object] = {"primefaces_keys": keys}
+    for field in ("source", "execute", "render", "event"):
+        info = _field_result(canonical.get(field), field in canonical)
+        result[f"{field}_present"] = info["present"]
+        result[f"{field}_kind"] = info["kind"]
+        result[field] = info["value"]
+        result[f"{field}_dynamic"] = info["dynamic"]
+        result[f"{field}_refs"] = info["refs"]
+        result[f"{field}_functions"] = info["functions"]
+
+    params_expr = canonical.get("params")
+    result["params_present"] = params_expr is not None
+    result["param_names"] = _params_names(params_expr or "")
+    result["partial_event"] = None
     return result
 
 
@@ -223,47 +383,56 @@ def _find_direct_ajax(body: str) -> dict[str, object] | None:
         start = body.find("(", pf.start())
         inner, _ = _balanced_segment(body, start, "(", ")")
         if inner is not None:
-            args = _split_top_level_args(inner)
-            obj = args[0] if args else ""
-            contract = {"ajax_type": "PrimeFaces.ab", "ajax_direct": True}
-            contract.update(_pf_options(obj))
-            contract.setdefault("partial_event", None)
-            contract.setdefault("partial_event_dynamic", False)
+            args = _split_top_level(inner)
+            first = args[0] if args else ""
+            contract: dict[str, object] = {
+                "ajax_type": "PrimeFaces.ab",
+                "ajax_direct": True,
+            }
+            contract.update(_primefaces_options(first))
             return contract
+
     jsf = re.search(r"(?:jsf|faces)\.ajax\.request\s*\(", body)
     if jsf:
         start = body.find("(", jsf.start())
         inner, _ = _balanced_segment(body, start, "(", ")")
-        args = _split_top_level_args(inner or "")
-        source_expr = args[0] if len(args) > 0 else ""
-        event_expr = args[1] if len(args) > 1 else ""
-        opts = args[2] if len(args) > 2 else ""
-        source_lit = _literal(source_expr)
-        event_lit = _literal(event_expr)
-        contract: dict[str, object] = {
-            "ajax_type": "jsf.ajax.request" if body[jsf.start():].startswith("jsf") else "faces.ajax.request",
+        args = _split_top_level(inner or "")
+        source_expr = args[0] if len(args) > 0 else None
+        event_expr = args[1] if len(args) > 1 else None
+        options = args[2] if len(args) > 2 else "{}"
+        option_members = dict(_parse_object_members(options))
+        contract = {
+            "ajax_type": (
+                "jsf.ajax.request"
+                if body[jsf.start() :].startswith("jsf")
+                else "faces.ajax.request"
+            ),
             "ajax_direct": True,
-            "source": _safe_name(source_lit) if source_lit is not None else None,
-            "source_dynamic": source_lit is None,
-            "source_refs": _safe_expr_names(source_expr) if source_lit is None else [],
-            "event": _safe_name(event_lit) if event_lit is not None else None,
-            "event_dynamic": event_lit is None,
-            "event_refs": _safe_expr_names(event_expr) if event_lit is None else [],
-            "execute": None, "render": None, "partial_event": None, "param_names": [],
+            "primefaces_keys": [],
+            "params_present": False,
+            "param_names": [],
+            "partial_event": None,
         }
-        for jsf_key, canon in (("execute", "execute"), ("render", "render"), ("onevent", "partial_event")):
-            m = re.search(rf"\b{jsf_key}\s*:\s*([^,}}]+)", opts, re.I | re.S)
-            if m:
-                lit = _literal(m.group(1).strip())
-                contract[canon] = _safe_name(lit) if lit is not None else None
-                contract[f"{canon}_dynamic"] = lit is None
-                if lit is None:
-                    contract[f"{canon}_refs"] = _safe_expr_names(m.group(1))
+        for field, expr in (
+            ("source", source_expr),
+            ("event", event_expr),
+            ("execute", option_members.get("execute")),
+            ("render", option_members.get("render")),
+        ):
+            info = _field_result(expr, expr is not None)
+            contract[f"{field}_present"] = info["present"]
+            contract[f"{field}_kind"] = info["kind"]
+            contract[field] = info["value"]
+            contract[f"{field}_dynamic"] = info["dynamic"]
+            contract[f"{field}_refs"] = info["refs"]
+            contract[f"{field}_functions"] = info["functions"]
         return contract
     return None
 
 
-def _resolve_ajax(functions: dict[str, str], start: str, max_depth: int = 3) -> tuple[dict[str, object] | None, str | None]:
+def _resolve_ajax(
+    functions: dict[str, str], start: str, max_depth: int = 3
+) -> dict[str, object] | None:
     seen: set[str] = set()
     queue: list[tuple[str, int, str | None]] = [(start, 0, None)]
     while queue:
@@ -278,24 +447,26 @@ def _resolve_ajax(functions: dict[str, str], start: str, max_depth: int = 3) -> 
         if direct:
             direct["ajax_via_function"] = via
             direct["resolved_function"] = name
-            return direct, name
+            return direct
         if depth == max_depth:
             continue
         for called in _calls(body):
             simple = called.split(".")[-1]
             if simple in functions and simple not in seen:
-                queue.append((simple, depth + 1, simple if start == name else (via or name)))
-    return None, None
+                queue.append((simple, depth + 1, simple if depth == 0 else (via or name)))
+    return None
 
 
 def _copy_pairs(body: str) -> list[dict[str, str]]:
     pattern = re.compile(
         r"document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\.value\s*=\s*"
-        r"document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\.value", re.I
+        r"document\.getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)\.value",
+        re.I,
     )
     result: list[dict[str, str]] = []
     for match in pattern.finditer(body):
-        target, source = _safe_name(match.group(1)), _safe_name(match.group(2))
+        target = _safe_name(match.group(1))
+        source = _safe_name(match.group(2))
         if target and source:
             result.append({"from": source, "to": target})
     return result[:10]
@@ -310,18 +481,41 @@ def assign_to_date_contract(markup: str) -> dict[str, object]:
         "ajax_type": None,
         "ajax_direct": False,
         "ajax_via_function": None,
+        "primefaces_keys": [],
+        "source_present": False,
+        "source_kind": None,
         "source": None,
+        "source_dynamic": False,
+        "source_refs": [],
+        "source_functions": [],
+        "execute_present": False,
+        "execute_kind": None,
         "execute": None,
+        "execute_dynamic": False,
+        "execute_refs": [],
+        "execute_functions": [],
+        "render_present": False,
+        "render_kind": None,
         "render": None,
+        "render_dynamic": False,
+        "render_refs": [],
+        "render_functions": [],
+        "event_present": False,
+        "event_kind": None,
         "event": None,
-        "partial_event": None,
+        "event_dynamic": False,
+        "event_refs": [],
+        "event_functions": [],
+        "params_present": False,
         "param_names": [],
+        "partial_event": None,
         "reads": [],
         "writes": [],
         "calls": [],
         "copies": [],
         "hidden_fields": [],
         "called_by": [],
+        "submit": False,
     }
     if body is None:
         return base
@@ -351,7 +545,7 @@ def assign_to_date_contract(markup: str) -> dict[str, object]:
                     called_by.append(ident)
     base["called_by"] = called_by[:10]
 
-    ajax_contract, _ = _resolve_ajax(functions, "assignToDate")
+    ajax_contract = _resolve_ajax(functions, "assignToDate")
     if ajax_contract:
         base["ajax"] = True
         base.update(ajax_contract)
@@ -365,7 +559,7 @@ class AssignToDateDiagnosticSessionProxy(InlineDateHandlerDiagnosticSessionProxy
         await super()._diagnose(method, data, response)
         try:
             body = await response.text()
-        except Exception:  # pragma: no cover
+        except Exception:  # pragma: no cover - diagnostics must never break I/O
             return
         markup = _markup_from_response(body)
         if not markup or "assignToDate" not in markup:
@@ -374,14 +568,17 @@ class AssignToDateDiagnosticSessionProxy(InlineDateHandlerDiagnosticSessionProxy
         if not contract["found"]:
             return
         _LOGGER.warning(
-            "LINZ NETZ diagnostic-assign-to-date: step=%s ajax=%s ajax_type=%s ajax_direct=%s ajax_via_function=%s source=%s execute=%s render=%s event=%s partial_event=%s param_names=%s source_dynamic=%s execute_dynamic=%s render_dynamic=%s event_dynamic=%s reads=%s writes=%s calls=%s copies=%s hidden_fields=%s called_by=%s",
+            "LINZ NETZ diagnostic-assign-to-date: step=%s ajax=%s ajax_type=%s ajax_direct=%s ajax_via_function=%s primefaces_keys=%s "
+            "source_present=%s source_kind=%s source=%s source_dynamic=%s source_refs=%s source_functions=%s "
+            "execute_present=%s execute_kind=%s execute=%s execute_dynamic=%s execute_refs=%s execute_functions=%s "
+            "render_present=%s render_kind=%s render=%s render_dynamic=%s render_refs=%s render_functions=%s "
+            "event_present=%s event_kind=%s event=%s event_dynamic=%s event_refs=%s event_functions=%s "
+            "params_present=%s param_names=%s partial_event=%s reads=%s writes=%s calls=%s copies=%s hidden_fields=%s called_by=%s submit=%s",
             _request_step(method, data),
-            contract.get("ajax"), contract.get("ajax_type"), contract.get("ajax_direct"),
-            contract.get("ajax_via_function"), contract.get("source"), contract.get("execute"),
-            contract.get("render"), contract.get("event"), contract.get("partial_event"),
-            contract.get("param_names"), contract.get("source_dynamic", False),
-            contract.get("execute_dynamic", False), contract.get("render_dynamic", False),
-            contract.get("event_dynamic", False), contract.get("reads"), contract.get("writes"),
-            contract.get("calls"), contract.get("copies"), contract.get("hidden_fields"),
-            contract.get("called_by"),
+            contract["ajax"], contract["ajax_type"], contract["ajax_direct"], contract["ajax_via_function"], contract["primefaces_keys"],
+            contract["source_present"], contract["source_kind"], contract["source"], contract["source_dynamic"], contract["source_refs"], contract["source_functions"],
+            contract["execute_present"], contract["execute_kind"], contract["execute"], contract["execute_dynamic"], contract["execute_refs"], contract["execute_functions"],
+            contract["render_present"], contract["render_kind"], contract["render"], contract["render_dynamic"], contract["render_refs"], contract["render_functions"],
+            contract["event_present"], contract["event_kind"], contract["event"], contract["event_dynamic"], contract["event_refs"], contract["event_functions"],
+            contract["params_present"], contract["param_names"], contract["partial_event"], contract["reads"], contract["writes"], contract["calls"], contract["copies"], contract["hidden_fields"], contract["called_by"], contract["submit"],
         )

@@ -102,7 +102,6 @@ def _param_structure(expr: str | None) -> dict[str, object]:
                     if ref not in refs:
                         refs.append(ref)
 
-    # PrimeFaces parameter arrays can contain nested object literals. Parse those too.
     if kind == "array":
         for item in containers:
             for match in re.finditer(r"\b(?:name|n)\s*:\s*([^,}]+)", item, re.I | re.S):
@@ -187,14 +186,14 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
     elif u_expr is not None:
         contract["render_safe"] = False
 
-    param_info = _param_structure(pa_expr)
-    contract.update(param_info)
+    contract.update(_param_structure(pa_expr))
 
     component_refs: list[str] = []
     source = contract.get("source")
     if isinstance(source, str) and not source.startswith("<") and ":" in source:
         component_refs.append(source)
-    for expr in (f_expr, u_expr, pa_expr):
+    # Parameter values are deliberately excluded, even if they look like component IDs.
+    for expr in (f_expr, u_expr):
         for ref in _literal_component_refs(expr):
             if ref not in component_refs:
                 component_refs.append(ref)

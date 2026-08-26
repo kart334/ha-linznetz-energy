@@ -40,14 +40,30 @@ _ASSIGNMENT_RE: Final = re.compile(
     re.IGNORECASE,
 )
 _FUNCTION_CALL_RE: Final = re.compile(r"\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(")
-_SAFE_NAME_RE: Final = re.compile(r"^[A-Za-z0-9_:@.\-$]+$")
+_SAFE_TOKEN_RE: Final = re.compile(r"^[A-Za-z0-9_:@.\-$]+$")
 
 
-def _safe_name(value: str | None) -> str | None:
+def _safe_token(value: str | None) -> str | None:
     if not value:
         return None
     value = value[:160]
-    return value if _SAFE_NAME_RE.fullmatch(value) else "<non-component>"
+    return value if _SAFE_TOKEN_RE.fullmatch(value) else "<non-component>"
+
+
+def _safe_target_expression(value: str | None) -> str | None:
+    """Keep only whitespace-separated JSF component selectors/keywords."""
+    if not value:
+        return None
+    tokens = value.split()
+    if not tokens or len(tokens) > 20:
+        return "<non-component>"
+    safe: list[str] = []
+    for token in tokens:
+        checked = _safe_token(token)
+        if checked in {None, "<non-component>"}:
+            return "<non-component>"
+        safe.append(str(checked))
+    return " ".join(safe)[:320]
 
 
 def _parse_options(config: str) -> dict[str, str]:
@@ -61,7 +77,7 @@ def _param_names(config: str) -> list[str]:
     """Extract parameter names only, never parameter values."""
     names: list[str] = []
     for match in _PARAM_NAME_RE.finditer(config):
-        name = _safe_name(match.group(1) or match.group(2))
+        name = _safe_token(match.group(1) or match.group(2))
         if name and name not in names:
             names.append(name)
     return names[:20]
@@ -73,7 +89,7 @@ def _pre_ajax_assignments(handler: str, ajax_start: int) -> list[str]:
     fields: list[str] = []
     for match in _ASSIGNMENT_RE.finditer(before):
         raw = next((group for group in match.groups() if group), None)
-        safe = _safe_name(raw)
+        safe = _safe_token(raw)
         if safe and safe not in fields:
             fields.append(safe)
     return fields[:10]
@@ -92,10 +108,21 @@ def _safe_function_calls(handler: str) -> list[str]:
         name = match.group(1)
         if name in blocked or name.startswith("PrimeFaces."):
             continue
-        safe = _safe_name(name)
+        safe = _safe_token(name)
         if safe and safe not in result:
             result.append(safe)
     return result[:10]
+
+
+def _selector_flags(value: str | None, component_id: str) -> dict[str, bool]:
+    tokens = set((value or "").split())
+    return {
+        "uses_this": "@this" in tokens,
+        "uses_form": "@form" in tokens,
+        "contains_self": component_id in tokens,
+        "contains_from": any("calendarFromRegion" in token for token in tokens),
+        "contains_to": any("calendarToRegion" in token for token in tokens),
+    }
 
 
 def inline_handler_contract(control: Tag, event_attr: str = "onchange") -> dict[str, object]:
@@ -103,7 +130,7 @@ def inline_handler_contract(control: Tag, event_attr: str = "onchange") -> dict[
     handler = str(control.get(event_attr) or "")
     identifier = str(control.get("id") or control.get("name") or "")
     base = {
-        "calendar": _safe_name(identifier),
+        "calendar": _safe_token(identifier),
         "event_attr": event_attr,
         "present": bool(handler),
         "primefaces_ajax": "PrimeFaces.ab" in handler,
@@ -112,6 +139,7 @@ def inline_handler_contract(control: Tag, event_attr: str = "onchange") -> dict[
         "render": None,
         "event": None,
         "partial_event": None,
+        "execute_flags": _selector_flags(None, identifier),
         "related_controls": [],
         "param_names": [],
         "pre_ajax_assignments": [],
@@ -146,13 +174,14 @@ def inline_handler_contract(control: Tag, event_attr: str = "onchange") -> dict[
 
     base.update(
         {
-            "source": _safe_name(source),
-            "execute": _safe_name(execute),
-            "render": _safe_name(render),
+            "source": _safe_token(source),
+            "execute": _safe_target_expression(execute),
+            "render": _safe_target_expression(render),
             "event": (event or "")[:40] or None,
-            # PrimeFaces inline handlers may not spell out javax.faces.partial.event;
-            # record only an explicitly discoverable value rather than guessing.
+            # Record only an explicitly discoverable PrimeFaces event. Do not infer
+            # javax/jakarta.faces.partial.event when it is not present in markup.
             "partial_event": None,
+            "execute_flags": _selector_flags(execute, identifier),
             "related_controls": related,
             "param_names": _param_names(match.group(1)),
             "pre_ajax_assignments": _pre_ajax_assignments(handler, match.start()),
@@ -193,7 +222,7 @@ class InlineDateHandlerDiagnosticSessionProxy(DateContractDiagnosticSessionProxy
             return
         for contract in calendar_inline_contracts(markup):
             _LOGGER.warning(
-                "LINZ NETZ diagnostic-date-contract: step=%s calendar=%s event_attr=%s present=%s primefaces_ajax=%s source=%s execute=%s render=%s event=%s partial_event=%s related_controls=%s param_names=%s pre_ajax_assignments=%s function_calls=%s",
+                "LINZ NETZ diagnostic-date-contract: step=%s calendar=%s event_attr=%s present=%s primefaces_ajax=%s source=%s execute=%s render=%s event=%s partial_event=%s execute_flags=%s related_controls=%s param_names=%s pre_ajax_assignments=%s function_calls=%s",
                 step,
                 contract["calendar"],
                 contract["event_attr"],
@@ -204,6 +233,7 @@ class InlineDateHandlerDiagnosticSessionProxy(DateContractDiagnosticSessionProxy
                 contract["render"],
                 contract["event"],
                 contract["partial_event"],
+                contract["execute_flags"],
                 contract["related_controls"],
                 contract["param_names"],
                 contract["pre_ajax_assignments"],

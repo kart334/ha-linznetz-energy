@@ -24,6 +24,10 @@ _SELECTED_CLASS_RE: Final = re.compile(r":selectedClass$", re.IGNORECASE)
 _QUARTER_TEXT_RE: Final = re.compile(r"viertelstunden|quarter", re.IGNORECASE)
 _KWH_TEXT_RE: Final = re.compile(r"\bkwh\b|energiemenge", re.IGNORECASE)
 _TABLE_ID_RE: Final = re.compile(r":consumptionsTable$", re.IGNORECASE)
+_DATE_INPUT_SUFFIX_RE: Final = re.compile(r"_input$", re.IGNORECASE)
+_PRIMEFACES_AJAX_RE: Final = re.compile(
+    r"PrimeFaces\.ab\(\s*\{(.*?)\}\s*(?:,|\))", re.DOTALL
+)
 
 
 class LinzNetzError(Exception):
@@ -55,6 +59,16 @@ class PaginationInfo:
     table_id: str
     rows: int
     row_count: int
+
+
+@dataclass(frozen=True)
+class AjaxBehavior:
+    """PrimeFaces AJAX behavior discovered from rendered widget JavaScript."""
+
+    source: str
+    execute: str
+    render: str
+    event: str
 
 
 class LinzNetzClient:
@@ -146,6 +160,9 @@ class LinzNetzClient:
         if quarter is None:
             self._log_safe_form_diagnostics(soup, form)
             raise LinzNetzParseError("Auswahl 'Viertelstundenwerte' nicht gefunden")
+
+        working_form = form
+        behavior_soups = [soup]
         kwh = self._find_choice_field(form, "KWH", _KWH_TEXT_RE)
         if kwh is None:
             stage = await self._async_apply_choice(
@@ -153,41 +170,80 @@ class LinzNetzClient:
             )
             view_state_value = self._extract_partial_view_state(stage) or view_state_value
             stage_soup = self._partial_response_soup(stage)
-            kwh = self._find_choice_field(stage_soup, "KWH", _KWH_TEXT_RE)
+            behavior_soups.insert(0, stage_soup)
+            stage_form = self._find_consumption_form(stage_soup)
+            if stage_form is not None:
+                working_form = stage_form
+            kwh = self._find_choice_field(working_form, "KWH", _KWH_TEXT_RE)
             if kwh is None:
-                self._log_safe_form_diagnostics(stage_soup, stage_soup)
+                kwh = self._find_choice_field(stage_soup, "KWH", _KWH_TEXT_RE)
+            if kwh is None:
+                self._log_safe_form_diagnostics(stage_soup, working_form)
                 raise LinzNetzParseError(
                     "Auswahl 'kWh' nach Viertelstunden-Auswahl nicht gefunden"
                 )
 
-        date_from = self._find_named_control(form, _FROM_RE)
-        date_to = self._find_named_control(form, _TO_RE)
-        button = self._find_display_button(form)
+        date_from = self._find_named_control(working_form, _FROM_RE)
+        date_to = self._find_named_control(working_form, _TO_RE)
+        if date_from is None or date_to is None:
+            date_from = self._find_named_control(form, _FROM_RE)
+            date_to = self._find_named_control(form, _TO_RE)
         if date_from is None or date_to is None:
             raise LinzNetzParseError("Datumsfelder nicht gefunden")
         if not date_from.get("name") or not date_to.get("name"):
             raise LinzNetzParseError("Wirksame Datumsfeldnamen nicht gefunden")
+
+        view_state_value, working_form, date_ajax_complete = await self._async_select_day(
+            behavior_soups=behavior_soups,
+            form=working_form,
+            form_id=form_id,
+            date_from=date_from,
+            date_to=date_to,
+            quarter=quarter,
+            kwh=kwh,
+            requested_day=day,
+            view_state_name=view_state_name,
+            view_state_value=view_state_value,
+        )
+
+        date_from = self._find_named_control(working_form, _FROM_RE) or date_from
+        date_to = self._find_named_control(working_form, _TO_RE) or date_to
+        button = self._find_display_button(working_form) or self._find_display_button(form)
         if button is None or not button.get("id"):
             raise LinzNetzParseError("Button 'Anzeigen' nicht gefunden")
         button_id = str(button.get("id"))
         day_text = day.strftime("%d.%m.%Y")
-        payload = {
-            "jakarta.faces.partial.ajax": "true",
-            "jakarta.faces.source": button_id,
-            "jakarta.faces.partial.execute": button_id,
-            "jakarta.faces.partial.render": self._find_render_target(form, form_id),
-            "jakarta.faces.behavior.event": "action",
-            "jakarta.faces.partial.event": "click",
-            form_id: form_id,
-            quarter.name: quarter.value,
-            str(date_from.get("name")): day_text,
-            str(date_to.get("name")): day_text,
-            kwh.name: kwh.value,
-            view_state_name: view_state_value,
-        }
-        period = form.find(
+
+        # A browser normally lets the PrimeFaces DatePicker update the server-side
+        # model before clicking "Anzeigen". If no explicit DatePicker AJAX behavior
+        # can be discovered, process the whole form on the display request instead
+        # of merely posting date strings while executing only the button.
+        payload = self._collect_form_payload(working_form)
+        payload.update(
+            {
+                "jakarta.faces.partial.ajax": "true",
+                "jakarta.faces.source": button_id,
+                "jakarta.faces.partial.execute": button_id if date_ajax_complete else "@form",
+                "jakarta.faces.partial.render": self._find_render_target(
+                    working_form, form_id
+                ),
+                "jakarta.faces.behavior.event": "action",
+                "jakarta.faces.partial.event": "click",
+                form_id: form_id,
+                quarter.name: quarter.value,
+                str(date_from.get("name")): day_text,
+                str(date_to.get("name")): day_text,
+                kwh.name: kwh.value,
+                view_state_name: view_state_value,
+            }
+        )
+        period = working_form.find(
             "input", attrs={"name": re.compile(r"periodRange$", re.IGNORECASE)}
         )
+        if period is None:
+            period = form.find(
+                "input", attrs={"name": re.compile(r"periodRange$", re.IGNORECASE)}
+            )
         if period is not None and period.get("name"):
             payload[str(period.get("name"))] = str(period.get("value", "valid"))
         headers = {
@@ -287,6 +343,196 @@ class LinzNetzClient:
                 f"requested={requested_day.isoformat()} returned={returned}"
             )
         return readings
+
+    async def _async_select_day(
+        self,
+        *,
+        behavior_soups: list[BeautifulSoup],
+        form: Tag,
+        form_id: str,
+        date_from: Tag,
+        date_to: Tag,
+        quarter: ChoiceField,
+        kwh: ChoiceField,
+        requested_day: date,
+        view_state_name: str,
+        view_state_value: str,
+    ) -> tuple[str, Tag, bool]:
+        """Apply the requested day through discovered PrimeFaces DatePicker AJAX."""
+        current_form = form
+        current_view_state = view_state_value
+        day_text = requested_day.strftime("%d.%m.%Y")
+        all_ajaxed = True
+
+        for control, pattern in ((date_from, _FROM_RE), (date_to, _TO_RE)):
+            behavior = None
+            for behavior_soup in behavior_soups:
+                behavior = self._find_date_behavior(behavior_soup, control, form_id)
+                if behavior is not None:
+                    break
+            if behavior is None:
+                all_ajaxed = False
+                continue
+
+            current_from = self._find_named_control(current_form, _FROM_RE) or date_from
+            current_to = self._find_named_control(current_form, _TO_RE) or date_to
+            payload = self._build_date_selection_payload(
+                current_form,
+                form_id,
+                current_from,
+                current_to,
+                quarter,
+                kwh,
+                day_text,
+                behavior,
+                view_state_name,
+                current_view_state,
+            )
+            result = await self._session.post(
+                PORTAL_URL,
+                data=payload,
+                headers={
+                    "Faces-Request": "partial/ajax",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                allow_redirects=True,
+            )
+            result.raise_for_status()
+            body = await result.text()
+            current_view_state = (
+                self._extract_partial_view_state(body) or current_view_state
+            )
+            updated_soup = self._partial_response_soup(body)
+            updated_form = self._find_consumption_form(updated_soup)
+            if updated_form is not None:
+                current_form = updated_form
+                self._verify_rendered_day_if_present(
+                    current_form, pattern, requested_day
+                )
+                behavior_soups.insert(0, updated_soup)
+
+        return current_view_state, current_form, all_ajaxed
+
+    @classmethod
+    def _find_date_behavior(
+        cls, soup: BeautifulSoup, control: Tag, form_id: str
+    ) -> AjaxBehavior | None:
+        """Discover a DatePicker AJAX behavior from PrimeFaces widget JavaScript."""
+        candidates = cls._date_component_candidates(control)
+        if not candidates:
+            return None
+        for script in soup.find_all("script"):
+            text = script.string or script.get_text(" ", strip=False)
+            if not text or not any(candidate in text for candidate in candidates):
+                continue
+            for match in _PRIMEFACES_AJAX_RE.finditer(text):
+                options = cls._parse_primefaces_ajax_options(match.group(1))
+                source = options.get("s") or options.get("source")
+                event = options.get("e") or options.get("event")
+                if source not in candidates or not event:
+                    continue
+                if event.lower() not in {"dateselect", "change"}:
+                    continue
+                execute = options.get("p") or options.get("process") or source
+                render = options.get("u") or options.get("update") or form_id
+                return AjaxBehavior(source, execute, render, event)
+        return None
+
+    @staticmethod
+    def _parse_primefaces_ajax_options(config: str) -> dict[str, str]:
+        """Parse string-valued PrimeFaces.ab options without evaluating JavaScript."""
+        options: dict[str, str] = {}
+        for match in re.finditer(
+            r"\b(s|source|e|event|p|process|u|update|f|form)\s*:\s*"
+            r"(?:\"([^\"]*)\"|'([^']*)')",
+            config,
+            flags=re.IGNORECASE,
+        ):
+            options[match.group(1).lower()] = match.group(2) or match.group(3) or ""
+        return options
+
+    @staticmethod
+    def _date_component_candidates(control: Tag) -> set[str]:
+        """Return possible DatePicker component IDs for a rendered input control."""
+        candidates: set[str] = set()
+        for attr in ("name", "id"):
+            raw = str(control.get(attr) or "")
+            if raw:
+                candidates.add(raw)
+                candidates.add(_DATE_INPUT_SUFFIX_RE.sub("", raw))
+        return {candidate for candidate in candidates if candidate}
+
+    @classmethod
+    def _build_date_selection_payload(
+        cls,
+        form: Tag,
+        form_id: str,
+        date_from: Tag,
+        date_to: Tag,
+        quarter: ChoiceField,
+        kwh: ChoiceField,
+        day_text: str,
+        behavior: AjaxBehavior,
+        view_state_name: str,
+        view_state_value: str,
+    ) -> dict[str, str]:
+        """Build the browser-equivalent DatePicker AJAX payload."""
+        payload = cls._collect_form_payload(form)
+        payload.update(
+            {
+                "jakarta.faces.partial.ajax": "true",
+                "jakarta.faces.source": behavior.source,
+                "jakarta.faces.partial.execute": behavior.execute,
+                "jakarta.faces.partial.render": behavior.render,
+                "jakarta.faces.behavior.event": behavior.event,
+                "jakarta.faces.partial.event": behavior.event,
+                form_id: form_id,
+                str(date_from.get("name")): day_text,
+                str(date_to.get("name")): day_text,
+                quarter.name: quarter.value,
+                kwh.name: kwh.value,
+                view_state_name: view_state_value,
+            }
+        )
+        return payload
+
+    @staticmethod
+    def _verify_rendered_day_if_present(
+        form: Tag, pattern: re.Pattern[str], requested_day: date
+    ) -> None:
+        """Fail closed if an updated date field explicitly renders another day."""
+        control = LinzNetzClient._find_named_control(form, pattern)
+        if control is None:
+            return
+        value = str(control.get("value") or "").strip()
+        if value and value != requested_day.strftime("%d.%m.%Y"):
+            raise LinzNetzParseError(
+                "Portal bestätigte Datumswechsel nicht: "
+                f"requested={requested_day.isoformat()}"
+            )
+
+    @staticmethod
+    def _collect_form_payload(form: Tag) -> dict[str, str]:
+        """Serialize successful controls from the consumption form in memory only."""
+        payload: dict[str, str] = {}
+        for tag in form.find_all(["input", "select", "textarea"]):
+            name = str(tag.get("name") or "")
+            if not name:
+                continue
+            if tag.name == "input":
+                kind = str(tag.get("type") or "text").lower()
+                if kind in {"password", "file", "submit", "button", "image", "reset"}:
+                    continue
+                if kind in {"checkbox", "radio"} and not tag.has_attr("checked"):
+                    continue
+                payload[name] = str(tag.get("value") or "")
+            elif tag.name == "select":
+                selected = tag.find("option", selected=True) or tag.find("option")
+                if selected is not None:
+                    payload[name] = str(selected.get("value") or "")
+            else:
+                payload[name] = tag.get_text()
+        return payload
 
     @staticmethod
     def _build_pagination_payload(

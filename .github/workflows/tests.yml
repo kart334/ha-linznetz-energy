@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/legacy-backfill-trigger-migration
+      - fix/primefaces-date-selection
 
 jobs:
   test:
@@ -26,4 +26,4 @@ jobs:
             custom_components/linznetz_energy/config_flow.py \
             custom_components/linznetz_energy/coordinator.py
       - name: Run regression tests
-        run: pytest -q tests/test_api_day_validation.py tests/test_backfill_state.py
+        run: pytest -q tests

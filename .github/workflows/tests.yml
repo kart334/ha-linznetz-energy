@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/primefaces-pa-value-role-0.1.22
+      - fix/to-date-primefaces-contract-0.1.23
 
 jobs:
   test:

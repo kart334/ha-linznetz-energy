@@ -182,14 +182,14 @@ async def test_to_ajax_fails_closed_before_request_when_value_role_changes() -> 
     session = _FakeSession("<partial-response />")
     client = fix.BrowserContractLinzNetzClient(session, "u", "p")
     soup = _form()
-    script = soup.find("script")
-    assert script is not None
-    script.string = str(script.string).replace("value:this.value", "value:this")
     form = soup.find("form")
     assert form is not None
     date_from = form.find(id="myForm1:calendarFromRegion")
     date_to = form.find(id="myForm1:calendarToRegion")
     assert date_from is not None and date_to is not None
+    date_to["onchange"] = str(date_to["onchange"]).replace(
+        "value:this.value", "value:this"
+    )
 
     with pytest.raises(api.LinzNetzParseError, match="bestätigten PrimeFaces-Contract"):
         await client._async_select_day(

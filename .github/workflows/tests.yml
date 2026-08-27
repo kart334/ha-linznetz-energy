@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/to-date-empty-viewstate-0.1.26
+      - fix/to-date-jsf-viewstate-id-0.1.27
 
 jobs:
   test:

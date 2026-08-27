@@ -20,6 +20,11 @@ _STRING_LITERAL = re.compile(r"(['\"])(.*?)\1", re.DOTALL)
 _COMPONENT_FRAGMENT = re.compile(r"[A-Za-z0-9_.\-$]+:[A-Za-z0-9_:@.\-$]+")
 _CSS_ID_REF = re.compile(r"#([A-Za-z0-9_:@.\-$]+)")
 _JS_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+_ATTR_SEARCH = re.compile(
+    r"^@\(\[\s*([A-Za-z_$][A-Za-z0-9_$-]*)\s*(\^=|\$=|\*=|~=|\|=|=)\s*"
+    r"([A-Za-z0-9_:@.\-$]+)\s*\]\)$"
+)
+_ARGUMENT_INDEX = re.compile(r"\barguments\s*\[\s*(\d{1,3})\s*\]")
 
 
 def _primefaces_object(body: str) -> str | None:
@@ -79,6 +84,9 @@ def _render_structure(value: str | None) -> dict[str, object]:
         "render_char_classes": [],
         "render_safe_fragments": [],
         "render_css_id_refs": [],
+        "render_attr_name": None,
+        "render_attr_operator": None,
+        "render_attr_value": None,
     }
     if value is None:
         return result
@@ -87,7 +95,18 @@ def _render_structure(value: str | None) -> dict[str, object]:
         result["render_selector_kind"] = "reserved_keyword"
         result["render_reserved"] = value
     elif value.startswith("@(") and value.endswith(")"):
-        result["render_selector_kind"] = "primefaces_search"
+        attr_match = _ATTR_SEARCH.fullmatch(value)
+        result["render_selector_kind"] = (
+            "primefaces_attribute_search" if attr_match else "primefaces_search"
+        )
+        if attr_match:
+            attr_name, operator, attr_value = attr_match.groups()
+            safe_name = base._safe_name(attr_name)
+            safe_value = base._safe_name(attr_value)
+            if safe_name and safe_value and not safe_name.startswith("<") and not safe_value.startswith("<"):
+                result["render_attr_name"] = attr_name
+                result["render_attr_operator"] = operator
+                result["render_attr_value"] = attr_value
     elif _CSS_ID_REF.fullmatch(value):
         result["render_selector_kind"] = "css_id"
     else:
@@ -223,6 +242,93 @@ def _param_structure(expr: str | None) -> dict[str, object]:
     }
 
 
+def _arguments_structure(expr: str | None) -> dict[str, object]:
+    """Classify use of the JavaScript arguments object without logging values."""
+    result: dict[str, object] = {
+        "params_expr_length": len(expr.strip()) if expr is not None else None,
+        "params_arguments_mode": None,
+        "params_argument_indexes": [],
+        "params_expr_char_classes": [],
+        "params_function_refs": [],
+    }
+    if expr is None:
+        return result
+
+    stripped = expr.strip()
+    compact = re.sub(r"\\s+", "", stripped)
+    indexes = sorted({int(value) for value in _ARGUMENT_INDEX.findall(stripped)})
+    result["params_argument_indexes"] = indexes[:20]
+
+    if compact == "arguments":
+        mode = "bare_arguments"
+    elif re.fullmatch(r"arguments\\[\\d{1,3}\\]", compact):
+        mode = "indexed_arguments"
+    elif compact == "[...arguments]":
+        mode = "spread_arguments_array"
+    elif compact in {"Array.from(arguments)", "Array.prototype.slice.call(arguments)"}:
+        mode = "arguments_array_conversion"
+    elif re.search(r"\\barguments\\b", stripped):
+        mode = "composite_arguments_expression"
+    else:
+        mode = "no_arguments_reference"
+    result["params_arguments_mode"] = mode
+
+    classes: list[str] = []
+    for label, chars in (
+        ("brackets", "[]"),
+        ("parentheses", "()"),
+        ("dot", "."),
+        ("comma", ","),
+        ("spread", "..."),
+        ("operators", "+-*/?:"),
+        ("whitespace", " \\t\\r\\n"),
+    ):
+        if chars == "...":
+            present = chars in stripped
+        else:
+            present = any(char in stripped for char in chars)
+        if present:
+            classes.append(label)
+    result["params_expr_char_classes"] = classes
+    result["params_function_refs"] = base._function_names(stripped)[:20]
+    return result
+
+
+def _assign_call_structure(soup: Any) -> dict[str, object]:
+    """Report only arity and expression shapes of inline assignToDate callers."""
+    arities: list[int] = []
+    kinds: list[str] = []
+    param_names: list[str] = []
+    for tag in soup.find_all(True):
+        for raw_value in tag.attrs.values():
+            values = raw_value if isinstance(raw_value, list) else [raw_value]
+            for value in values:
+                if not isinstance(value, str) or "assignToDate" not in value:
+                    continue
+                masked = base._mask_strings_and_comments(value)
+                for match in re.finditer(r"\\bassignToDate\\s*\\(", masked):
+                    start = masked.find("(", match.start())
+                    inner, _ = base._balanced_segment(value, start, "(", ")")
+                    if inner is None:
+                        continue
+                    args = base._split_top_level(inner) if inner.strip() else []
+                    if len(args) not in arities:
+                        arities.append(len(args))
+                    for arg in args:
+                        kind = base._expression_kind(arg)
+                        if kind not in kinds:
+                            kinds.append(kind)
+                        detail = _param_structure(arg)
+                        for name in detail["param_names"]:
+                            if name not in param_names:
+                                param_names.append(name)
+    return {
+        "assign_call_arities": arities[:20],
+        "assign_call_arg_kinds": kinds[:20],
+        "assign_call_param_names": param_names[:20],
+    }
+
+
 def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
     contract = base.assign_to_date_contract(markup)
     functions, soup = base._script_functions(markup)
@@ -247,9 +353,20 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
             "render_char_classes": [],
             "render_safe_fragments": [],
             "render_css_id_refs": [],
+            "render_attr_name": None,
+            "render_attr_operator": None,
+            "render_attr_value": None,
             "params_source": None,
             "assign_param_names": [],
             "assign_params_dynamic": False,
+            "params_expr_length": None,
+            "params_arguments_mode": None,
+            "params_argument_indexes": [],
+            "params_expr_char_classes": [],
+            "params_function_refs": [],
+            "assign_call_arities": [],
+            "assign_call_arg_kinds": [],
+            "assign_call_param_names": [],
         }
     )
     if body is None:
@@ -299,6 +416,8 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
         contract["render_safe"] = False
 
     contract.update(_param_structure(pa_expr))
+    contract.update(_arguments_structure(pa_expr))
+    contract.update(_assign_call_structure(soup))
 
     component_refs: list[str] = []
     source = contract.get("source")
@@ -334,17 +453,21 @@ class AssignToDateDetailDiagnosticSessionProxy(InlineDateHandlerDiagnosticSessio
             "f_present=%s f_kind=%s f=%s f_dynamic=%s f_refs=%s f_functions=%s f_role=%s "
             "render_present=%s render_kind=%s render=%s render_safe=%s render_dynamic=%s render_refs=%s render_functions=%s "
             "render_length=%s render_selector_kind=%s render_reserved=%s render_char_classes=%s "
-            "render_safe_fragments=%s render_css_id_refs=%s "
+            "render_safe_fragments=%s render_css_id_refs=%s render_attr_name=%s render_attr_operator=%s render_attr_value=%s "
             "params_present=%s params_kind=%s param_names=%s param_names_dynamic=%s param_name_refs=%s "
-            "params_source=%s assign_param_names=%s assign_params_dynamic=%s "
+            "params_source=%s assign_param_names=%s assign_params_dynamic=%s params_expr_length=%s "
+            "params_arguments_mode=%s params_argument_indexes=%s params_expr_char_classes=%s params_function_refs=%s "
+            "assign_call_arities=%s assign_call_arg_kinds=%s assign_call_param_names=%s "
             "component_refs=%s execute_present=%s event_present=%s partial_event=%s called_by=%s submit=%s",
             _request_step(method, data), c["ajax"], c["ajax_type"], c["ajax_direct"], c["primefaces_keys"],
             c["source_present"], c["source_kind"], c["source"], c["source_dynamic"], c["source_refs"],
             c["f_present"], c["f_kind"], c["f"], c["f_dynamic"], c["f_refs"], c["f_functions"], c["f_role"],
             c["render_present"], c["render_kind"], c["render"], c["render_safe"], c["render_dynamic"], c["render_refs"], c["render_functions"],
             c["render_length"], c["render_selector_kind"], c["render_reserved"], c["render_char_classes"],
-            c["render_safe_fragments"], c["render_css_id_refs"],
+            c["render_safe_fragments"], c["render_css_id_refs"], c["render_attr_name"], c["render_attr_operator"], c["render_attr_value"],
             c["params_present"], c["params_kind"], c["param_names"], c["param_names_dynamic"], c["param_name_refs"],
-            c["params_source"], c["assign_param_names"], c["assign_params_dynamic"],
+            c["params_source"], c["assign_param_names"], c["assign_params_dynamic"], c["params_expr_length"],
+            c["params_arguments_mode"], c["params_argument_indexes"], c["params_expr_char_classes"], c["params_function_refs"],
+            c["assign_call_arities"], c["assign_call_arg_kinds"], c["assign_call_param_names"],
             c["component_refs"], c["execute_present"], c["event_present"], c["partial_event"], c["called_by"], c["submit"],
         )

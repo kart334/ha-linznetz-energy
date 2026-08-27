@@ -85,9 +85,13 @@ def _form() -> BeautifulSoup:
           <span id="myForm1:list"></span>
           <input id="myForm1:btnIdA1" type="button" value="Anzeigen" />
         </form>
+        <form id="myform">
+          <input type="hidden" name="myform" value="myform" />
+          <input type="hidden" name="jakarta.faces.ViewState" value="to-state-1" />
+        </form>
         <script>
           function assignToDate() {
-            PrimeFaces.ab({s:'myForm1:j_idt1320',f:'myForm1',
+            PrimeFaces.ab({s:'myform:j_idt1320',f:'myform',
               u:'@([id$=panel_calendarToRegion])',pa:arguments[0]});
           }
         </script>
@@ -151,17 +155,21 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     assert view_state == "state-2"
     assert len(session.posts) == 2
     to_payload = session.posts[0]["data"]
-    assert to_payload["jakarta.faces.source"] == "myForm1:j_idt1320"
+    assert to_payload["jakarta.faces.source"] == "myform:j_idt1320"
     assert (
         to_payload["jakarta.faces.partial.render"]
         == "@([id$=panel_calendarToRegion])"
     )
     assert to_payload["assignToDate"] == "21.08.2026"
+    assert to_payload["myform"] == "myform"
+    assert to_payload["jakarta.faces.ViewState"] == "to-state-1"
+    assert "myForm1:calendarToRegion" not in to_payload
+    assert "myForm1:calendarFromRegion" not in to_payload
+    assert "myForm1:q:selectedClass" not in to_payload
+    assert "myForm1:k:selectedClass" not in to_payload
     assert "jakarta.faces.partial.execute" not in to_payload
     assert "jakarta.faces.behavior.event" not in to_payload
     assert "jakarta.faces.partial.event" not in to_payload
-    assert to_payload["myForm1:calendarToRegion"] == "21.08.2026"
-    assert to_payload["myForm1:calendarFromRegion"] == "21.08.2026"
 
     from_payload = session.posts[1]["data"]
     assert from_payload["jakarta.faces.partial.execute"] == "myForm1:calendarFromRegion"

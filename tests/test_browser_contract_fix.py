@@ -103,23 +103,16 @@ def _form() -> BeautifulSoup:
 
 
 @pytest.mark.asyncio
-async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
-    partial = """
+async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
+    from_partial = """
     <partial-response><changes>
-      <update id="myForm1:panel_calendarToRegion"><![CDATA[
-        <span id="myForm1:panel_calendarToRegion">
-          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
-                 type="text" value="21.08.2026"
-                 onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
-        </span>
-      ]]></update>
       <update id="myForm1"><![CDATA[
         <form id="myForm1">
           <input type="hidden" name="jakarta.faces.ViewState" value="state-2" />
           <input id="myForm1:calendarFromRegion" name="myForm1:calendarFromRegion" type="text" value="21.08.2026" onchange="PrimeFaces.ab({p:'myForm1:calendarFromRegion',u:'myForm1',e:'change'});" />
           <span id="myForm1:panel_calendarToRegion">
             <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
-                   type="text" value="21.08.2026"
+                   type="text" value="24.08.2026"
                    onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
           </span>
           <input name="myForm1:q:selectedClass" value="ConsumQuarter" checked="checked" type="radio" />
@@ -133,10 +126,17 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     """
     to_partial = """
     <partial-response><changes>
+      <update id="myForm1:panel_calendarToRegion"><![CDATA[
+        <span id="myForm1:panel_calendarToRegion">
+          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
+                 type="text" value="21.08.2026"
+                 onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
+        </span>
+      ]]></update>
       <update id="j_id1:jakarta.faces.ViewState:0"><![CDATA[]]></update>
     </changes></partial-response>
     """
-    session = _FakeSession([to_partial, partial])
+    session = _FakeSession([from_partial, to_partial])
     client = fix.BrowserContractLinzNetzClient(session, "u", "p")
     soup = _form()
     form = soup.find("form")
@@ -161,7 +161,17 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     assert complete is True
     assert view_state == "state-2"
     assert len(session.posts) == 2
-    to_payload = session.posts[0]["data"]
+    from_payload = session.posts[0]["data"]
+    assert from_payload["jakarta.faces.partial.execute"] == "myForm1:calendarFromRegion"
+    assert from_payload["jakarta.faces.partial.render"] == "myForm1"
+    assert from_payload["jakarta.faces.behavior.event"] == "change"
+    assert "jakarta.faces.source" not in from_payload
+    assert "jakarta.faces.partial.event" not in from_payload
+    assert from_payload["jakarta.faces.ViewState"] == "state-1"
+    assert from_payload["myForm1:calendarToRegion"] == "21.08.2026"
+    assert from_payload["myForm1:calendarFromRegion"] == "21.08.2026"
+
+    to_payload = session.posts[1]["data"]
     assert to_payload["jakarta.faces.source"] == "myform:j_idt1320"
     assert (
         to_payload["jakarta.faces.partial.render"]
@@ -178,15 +188,6 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     assert "jakarta.faces.behavior.event" not in to_payload
     assert "jakarta.faces.partial.event" not in to_payload
 
-    from_payload = session.posts[1]["data"]
-    assert from_payload["jakarta.faces.partial.execute"] == "myForm1:calendarFromRegion"
-    assert from_payload["jakarta.faces.partial.render"] == "myForm1"
-    assert from_payload["jakarta.faces.behavior.event"] == "change"
-    assert "jakarta.faces.source" not in from_payload
-    assert "jakarta.faces.partial.event" not in from_payload
-    assert from_payload["jakarta.faces.ViewState"] == "state-1"
-    assert from_payload["myForm1:calendarToRegion"] == "21.08.2026"
-    assert from_payload["myForm1:calendarFromRegion"] == "21.08.2026"
     assert updated_form.find(id="myForm1:calendarFromRegion").get("value") == "21.08.2026"
     assert updated_form.find(id="myForm1:calendarToRegion").get("value") == "21.08.2026"
 

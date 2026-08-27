@@ -189,6 +189,11 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         # can legitimately leave To at its previous value until assignToDate runs.
         self._verify_rendered_day_if_present(current_form, _FROM_RE, requested_day)
 
+        # JSF's browser client propagates every partial ViewState update to all
+        # forms on the page. Mirror that behavior before submitting the separate
+        # assignToDate form; its original hidden value is stale after From AJAX.
+        to_view_state["value"] = current_view_state
+
         to_payload = self._collect_form_payload(to_form)
         to_payload.update(
             {

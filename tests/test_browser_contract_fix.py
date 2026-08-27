@@ -179,7 +179,7 @@ async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
     )
     assert to_payload["assignToDate"] == "21.08.2026"
     assert to_payload["myform"] == "myform"
-    assert to_payload["jakarta.faces.ViewState"] == "to-state-1"
+    assert to_payload["jakarta.faces.ViewState"] == "state-2"
     assert "myForm1:calendarToRegion" not in to_payload
     assert "myForm1:calendarFromRegion" not in to_payload
     assert "myForm1:q:selectedClass" not in to_payload

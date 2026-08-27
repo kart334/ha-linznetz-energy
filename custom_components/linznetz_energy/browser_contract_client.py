@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import date
 import logging
+import re
 
 from bs4 import BeautifulSoup, Tag
 
@@ -25,6 +26,7 @@ from .const import PORTAL_URL
 from .inline_date_handler_diagnostics import inline_handler_contract
 
 _LOGGER = logging.getLogger(__name__)
+_TO_VIEW_STATE_RE = re.compile(r"(?:jakarta|javax)\.faces\.ViewState", re.IGNORECASE)
 
 
 class BrowserContractLinzNetzClient(LinzNetzClient):
@@ -140,13 +142,16 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         to_result.raise_for_status()
         to_body = await to_result.text()
         to_updates = self._parse_partial_updates(to_body)
-        if not any(_VIEW_STATE_RE.search(update_id) for update_id in to_updates):
+        to_view_state_value: str | None = None
+        for update_id, update_value in to_updates.items():
+            if _TO_VIEW_STATE_RE.search(update_id):
+                to_view_state_value = update_value
+                break
+        if to_view_state_value is None:
             raise LinzNetzParseError(
                 "assignToDate-AJAX lieferte keinen JSF-ViewState-Update-Knoten"
             )
-        current_view_state = (
-            self._extract_partial_view_state(to_body) or view_state_value
-        )
+        current_view_state = to_view_state_value or view_state_value
         current_form = self._merge_partial_response_form(
             current_form, form_id, to_body
         )

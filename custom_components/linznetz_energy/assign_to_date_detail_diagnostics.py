@@ -294,11 +294,59 @@ def _arguments_structure(expr: str | None) -> dict[str, object]:
     return result
 
 
+def _call_param_value_roles(expr: str) -> list[str]:
+    """Correlate safe parameter names with finite value-expression roles."""
+    stripped = expr.strip()
+    containers: list[str] = []
+    kind = base._expression_kind(stripped)
+    if kind == "array" and stripped.startswith("[") and stripped.endswith("]"):
+        containers = base._split_top_level(stripped[1:-1])
+    elif kind == "object":
+        containers = [stripped]
+
+    roles: list[str] = []
+    for container in containers:
+        members = {key.lower(): value for key, value in base._parse_object_members(container)}
+        name_expr = members.get("name") or members.get("n")
+        value_expr = members.get("value") or members.get("v")
+        name = base._literal(name_expr) if name_expr is not None else None
+        safe_name = base._safe_name(name) if name is not None else None
+        if (
+            not safe_name
+            or safe_name.startswith("<")
+            or value_expr is None
+        ):
+            continue
+
+        value = value_expr.strip()
+        literal = base._literal(value)
+        if literal is not None:
+            if literal == name:
+                role = "same_as_name"
+            elif literal == "":
+                role = "empty_string"
+            else:
+                role = "other_static_literal"
+        elif value == "this":
+            role = "this_element"
+        elif value == "this.value":
+            role = "this_value"
+        elif value in {"event", "window.event"}:
+            role = "event_object"
+        else:
+            role = base._expression_kind(value)
+        item = f"{safe_name}:{role}"
+        if item not in roles:
+            roles.append(item)
+    return roles[:20]
+
+
 def _assign_call_structure(soup: Any) -> dict[str, object]:
     """Report only arity and expression shapes of inline assignToDate callers."""
     arities: list[int] = []
     kinds: list[str] = []
     param_names: list[str] = []
+    value_roles: list[str] = []
     for tag in soup.find_all(True):
         for raw_value in tag.attrs.values():
             values = raw_value if isinstance(raw_value, list) else [raw_value]
@@ -322,10 +370,14 @@ def _assign_call_structure(soup: Any) -> dict[str, object]:
                         for name in detail["param_names"]:
                             if name not in param_names:
                                 param_names.append(name)
+                        for value_role in _call_param_value_roles(arg):
+                            if value_role not in value_roles:
+                                value_roles.append(value_role)
     return {
         "assign_call_arities": arities[:20],
         "assign_call_arg_kinds": kinds[:20],
         "assign_call_param_names": param_names[:20],
+        "assign_call_param_value_roles": value_roles[:20],
     }
 
 
@@ -367,6 +419,7 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
             "assign_call_arities": [],
             "assign_call_arg_kinds": [],
             "assign_call_param_names": [],
+            "assign_call_param_value_roles": [],
         }
     )
     if body is None:
@@ -457,7 +510,7 @@ class AssignToDateDetailDiagnosticSessionProxy(InlineDateHandlerDiagnosticSessio
             "params_present=%s params_kind=%s param_names=%s param_names_dynamic=%s param_name_refs=%s "
             "params_source=%s assign_param_names=%s assign_params_dynamic=%s params_expr_length=%s "
             "params_arguments_mode=%s params_argument_indexes=%s params_expr_char_classes=%s params_function_refs=%s "
-            "assign_call_arities=%s assign_call_arg_kinds=%s assign_call_param_names=%s "
+            "assign_call_arities=%s assign_call_arg_kinds=%s assign_call_param_names=%s assign_call_param_value_roles=%s "
             "component_refs=%s execute_present=%s event_present=%s partial_event=%s called_by=%s submit=%s",
             _request_step(method, data), c["ajax"], c["ajax_type"], c["ajax_direct"], c["primefaces_keys"],
             c["source_present"], c["source_kind"], c["source"], c["source_dynamic"], c["source_refs"],
@@ -468,6 +521,6 @@ class AssignToDateDetailDiagnosticSessionProxy(InlineDateHandlerDiagnosticSessio
             c["params_present"], c["params_kind"], c["param_names"], c["param_names_dynamic"], c["param_name_refs"],
             c["params_source"], c["assign_param_names"], c["assign_params_dynamic"], c["params_expr_length"],
             c["params_arguments_mode"], c["params_argument_indexes"], c["params_expr_char_classes"], c["params_function_refs"],
-            c["assign_call_arities"], c["assign_call_arg_kinds"], c["assign_call_param_names"],
+            c["assign_call_arities"], c["assign_call_arg_kinds"], c["assign_call_param_names"], c["assign_call_param_value_roles"],
             c["component_refs"], c["execute_present"], c["event_present"], c["partial_event"], c["called_by"], c["submit"],
         )

@@ -8,5 +8,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/kart334/ha-linznetz-energy/issues",
   "requirements": ["beautifulsoup4==4.13.4"],
-  "version": "0.1.18"
+  "version": "0.1.19"
 }

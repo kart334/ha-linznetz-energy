@@ -173,6 +173,7 @@ async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
 
     to_payload = session.posts[1]["data"]
     assert to_payload["jakarta.faces.source"] == "myform:j_idt1320"
+    assert to_payload["myform:j_idt1320"] == "myform:j_idt1320"
     assert (
         to_payload["jakarta.faces.partial.render"]
         == "@([id$=panel_calendarToRegion])"

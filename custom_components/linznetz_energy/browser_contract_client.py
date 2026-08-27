@@ -139,17 +139,12 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         )
         to_result.raise_for_status()
         to_body = await to_result.text()
-        to_updates = self._parse_partial_updates(to_body)
-        if not any(
-            update_id.endswith("panel_calendarToRegion")
-            for update_id in to_updates
-        ):
+        to_view_state_value = self._extract_partial_view_state(to_body)
+        if not to_view_state_value:
             raise LinzNetzParseError(
-                "assignToDate-AJAX bestätigte das To-Datumsfeld nicht"
+                "assignToDate-AJAX lieferte keinen bestätigten JSF ViewState"
             )
-        current_view_state = (
-            self._extract_partial_view_state(to_body) or view_state_value
-        )
+        current_view_state = to_view_state_value
         current_form = self._merge_partial_response_form(
             current_form, form_id, to_body
         )

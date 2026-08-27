@@ -58,13 +58,15 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, body: str) -> None:
+    def __init__(self, body: str | list[str]) -> None:
         self.body = body
         self.posts: list[dict[str, object]] = []
 
     async def post(self, url: str, **kwargs):
+        index = len(self.posts)
         self.posts.append({"url": url, **kwargs})
-        return _FakeResponse(self.body)
+        body = self.body[index] if isinstance(self.body, list) else self.body
+        return _FakeResponse(body)
 
 
 def _form() -> BeautifulSoup:
@@ -129,7 +131,12 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
       <update id="jakarta.faces.ViewState"><![CDATA[state-2]]></update>
     </changes></partial-response>
     """
-    session = _FakeSession(partial)
+    to_partial = """
+    <partial-response><changes>
+      <update id="jakarta.faces.ViewState"><![CDATA[state-2]]></update>
+    </changes></partial-response>
+    """
+    session = _FakeSession([to_partial, partial])
     client = fix.BrowserContractLinzNetzClient(session, "u", "p")
     soup = _form()
     form = soup.find("form")

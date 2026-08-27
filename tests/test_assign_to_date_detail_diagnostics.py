@@ -226,7 +226,33 @@ def test_inline_call_reports_argument_kinds_and_parameter_names_not_values() -> 
     assert c["assign_call_arities"] == [1]
     assert c["assign_call_arg_kinds"] == ["object"]
     assert c["assign_call_param_names"] == ["safeName"]
+    assert c["assign_call_param_value_roles"] == ["safeName:other_static_literal"]
     assert "SECRET" not in repr(c)
+
+
+
+def test_inline_call_classifies_finite_value_roles_without_values() -> None:
+    markup = """
+    <input id="one" onchange="assignToDate([
+      {name:'fromThis',value:this},
+      {name:'fromValue',value:this.value},
+      {name:'same',value:'same'},
+      {name:'empty',value:''}
+    ])" />
+    <script>
+      function assignToDate() {
+        PrimeFaces.ab({s:'Src',f:'myForm1',u:'myForm1:list',pa:arguments[0]});
+      }
+    </script>
+    """
+    c = diag.assign_to_date_detail_contract(markup)
+    assert c["assign_call_param_value_roles"] == [
+        "fromThis:this_element",
+        "fromValue:this_value",
+        "same:same_as_name",
+        "empty:empty_string",
+    ]
+    assert "fromThis:this_element" in repr(c)
 
 
 def test_false_positive_text_stays_false_positive_free() -> None:

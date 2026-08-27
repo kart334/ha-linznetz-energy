@@ -255,19 +255,19 @@ def _arguments_structure(expr: str | None) -> dict[str, object]:
         return result
 
     stripped = expr.strip()
-    compact = re.sub(r"\\s+", "", stripped)
+    compact = re.sub(r"\s+", "", stripped)
     indexes = sorted({int(value) for value in _ARGUMENT_INDEX.findall(stripped)})
     result["params_argument_indexes"] = indexes[:20]
 
     if compact == "arguments":
         mode = "bare_arguments"
-    elif re.fullmatch(r"arguments\\[\\d{1,3}\\]", compact):
+    elif re.fullmatch(r"arguments\[\d{1,3}\]", compact):
         mode = "indexed_arguments"
     elif compact == "[...arguments]":
         mode = "spread_arguments_array"
     elif compact in {"Array.from(arguments)", "Array.prototype.slice.call(arguments)"}:
         mode = "arguments_array_conversion"
-    elif re.search(r"\\barguments\\b", stripped):
+    elif re.search(r"\barguments\b", stripped):
         mode = "composite_arguments_expression"
     else:
         mode = "no_arguments_reference"
@@ -306,7 +306,7 @@ def _assign_call_structure(soup: Any) -> dict[str, object]:
                 if not isinstance(value, str) or "assignToDate" not in value:
                     continue
                 masked = base._mask_strings_and_comments(value)
-                for match in re.finditer(r"\\bassignToDate\\s*\\(", masked):
+                for match in re.finditer(r"\bassignToDate\s*\(", masked):
                     start = masked.find("(", match.start())
                     inner, _ = base._balanced_segment(value, start, "(", ")")
                     if inner is None:

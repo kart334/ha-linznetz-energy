@@ -133,7 +133,7 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     """
     to_partial = """
     <partial-response><changes>
-      <update id="jakarta.faces.ViewState"><![CDATA[]]></update>
+      <update id="j_id1:jakarta.faces.ViewState:0"><![CDATA[]]></update>
     </changes></partial-response>
     """
     session = _FakeSession([to_partial, partial])

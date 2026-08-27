@@ -19,6 +19,7 @@ from .api import (
     LinzNetzParseError,
     _FROM_RE,
     _TO_RE,
+    _VIEW_STATE_RE,
 )
 from .const import PORTAL_URL
 from .inline_date_handler_diagnostics import inline_handler_contract
@@ -60,14 +61,27 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         current_from["value"] = day_text
 
         to_contract: dict[str, object] | None = None
+        to_form: Tag | None = None
         for behavior_soup in behavior_soups:
             candidate = assign_to_date_detail_contract(str(behavior_soup))
-            if candidate.get("found"):
+            candidate_form_id = candidate.get("f")
+            if not candidate.get("found") or not isinstance(candidate_form_id, str):
+                continue
+            candidate_form = behavior_soup.find("form", id=candidate_form_id)
+            if candidate_form is None:
+                candidate_form = behavior_soup.find(
+                    "form", attrs={"name": candidate_form_id}
+                )
+            if isinstance(candidate_form, Tag):
                 to_contract = candidate
+                to_form = candidate_form
                 break
-        if to_contract is None:
-            raise LinzNetzParseError("assignToDate-PrimeFaces-Contract nicht gefunden")
+        if to_contract is None or to_form is None:
+            raise LinzNetzParseError(
+                "assignToDate-PrimeFaces-Form-Contract nicht gefunden"
+            )
 
+        to_form_id = str(to_contract.get("f"))
         source = to_contract.get("source")
         attr_name = to_contract.get("render_attr_name")
         attr_operator = to_contract.get("render_attr_operator")
@@ -77,8 +91,7 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
             to_contract.get("ajax_type") == "PrimeFaces.ab"
             and to_contract.get("ajax_direct") is True
             and isinstance(source, str)
-            and source.startswith(f"{form_id}:")
-            and to_contract.get("f") == form_id
+            and source.startswith(f"{to_form_id}:")
             and to_contract.get("f_role") == "form"
             and to_contract.get("render_selector_kind") == "primefaces_attribute_search"
             and attr_name == "id"
@@ -99,17 +112,20 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
                 "assignToDate entspricht nicht dem bestätigten PrimeFaces-Contract"
             )
 
-        to_payload = self._collect_form_payload(current_form)
+        to_view_state = to_form.find("input", attrs={"name": _VIEW_STATE_RE})
+        if to_view_state is None or not to_view_state.get("name"):
+            raise LinzNetzParseError(
+                "JSF ViewState im assignToDate-Formular nicht gefunden"
+            )
+
+        to_payload = self._collect_form_payload(to_form)
         to_payload.update(
             {
                 "jakarta.faces.partial.ajax": "true",
                 "jakarta.faces.source": source,
                 "jakarta.faces.partial.render": render,
                 "assignToDate": day_text,
-                form_id: form_id,
-                quarter.name: quarter.value,
-                kwh.name: kwh.value,
-                view_state_name: view_state_value,
+                to_form_id: to_form_id,
             }
         )
         to_result = await self._session.post(

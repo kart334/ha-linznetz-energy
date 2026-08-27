@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/primefaces-selector-arguments-call-0.1.21
+      - diagnostic/primefaces-pa-value-role-0.1.22
 
 jobs:
   test:

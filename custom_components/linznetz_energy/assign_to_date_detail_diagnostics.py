@@ -17,6 +17,9 @@ from .inline_date_handler_diagnostics import InlineDateHandlerDiagnosticSessionP
 _LOGGER = logging.getLogger(__name__)
 _SAFE_COMPONENT_TOKEN = re.compile(r"^[A-Za-z0-9_:@.\-$]+$")
 _STRING_LITERAL = re.compile(r"(['\"])(.*?)\1", re.DOTALL)
+_COMPONENT_FRAGMENT = re.compile(r"[A-Za-z0-9_.\-$]+:[A-Za-z0-9_:@.\-$]+")
+_CSS_ID_REF = re.compile(r"#([A-Za-z0-9_:@.\-$]+)")
+_JS_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
 def _primefaces_object(body: str) -> str | None:
@@ -65,6 +68,97 @@ def _literal_component_refs(expr: str | None) -> list[str]:
             if safe and not safe.startswith("<") and token not in refs:
                 refs.append(token)
     return refs[:30]
+
+
+def _render_structure(value: str | None) -> dict[str, object]:
+    """Classify a static render literal without exposing an unsafe raw value."""
+    result: dict[str, object] = {
+        "render_length": len(value) if value is not None else None,
+        "render_selector_kind": None,
+        "render_reserved": None,
+        "render_char_classes": [],
+        "render_safe_fragments": [],
+        "render_css_id_refs": [],
+    }
+    if value is None:
+        return result
+
+    if value in {"@none", "@all", "@this", "@form"}:
+        result["render_selector_kind"] = "reserved_keyword"
+        result["render_reserved"] = value
+    elif value.startswith("@(") and value.endswith(")"):
+        result["render_selector_kind"] = "primefaces_search"
+    elif _CSS_ID_REF.fullmatch(value):
+        result["render_selector_kind"] = "css_id"
+    else:
+        result["render_selector_kind"] = "unknown_static"
+
+    classes: list[str] = []
+    for label, chars in (
+        ("at", "@"),
+        ("hash", "#"),
+        ("colon", ":"),
+        ("dot", "."),
+        ("comma", ","),
+        ("parentheses", "()"),
+        ("brackets", "[]"),
+        ("equals", "="),
+        ("quotes", "'\""),
+        ("hyphen", "-"),
+        ("whitespace", " \t\r\n"),
+    ):
+        if any(char in value for char in chars):
+            classes.append(label)
+    known = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_:@.\-$#,()[]=\"' \t\r\n")
+    if any(char not in known for char in value):
+        classes.append("other")
+    result["render_char_classes"] = classes
+
+    fragments: list[str] = []
+    for match in _COMPONENT_FRAGMENT.finditer(value):
+        fragment = match.group(0)
+        safe = base._safe_name(fragment)
+        if safe and not safe.startswith("<") and fragment not in fragments:
+            fragments.append(fragment)
+    result["render_safe_fragments"] = fragments[:20]
+
+    css_refs: list[str] = []
+    for match in _CSS_ID_REF.finditer(value):
+        ref = match.group(1)
+        safe = base._safe_name(ref)
+        if safe and not safe.startswith("<") and ref not in css_refs:
+            css_refs.append(ref)
+    result["render_css_id_refs"] = css_refs[:20]
+    return result
+
+
+def _assign_to_date_params(markup: str) -> tuple[list[str], bool]:
+    """Return only safe parameter names from the assignToDate declaration."""
+    masked = base._mask_strings_and_comments(markup)
+    match = re.search(r"\bfunction\s+assignToDate\s*\(", masked)
+    if not match:
+        return [], False
+    start = masked.find("(", match.start())
+    inner, _ = base._balanced_segment(markup, start, "(", ")")
+    if inner is None:
+        return [], True
+
+    names: list[str] = []
+    dynamic = False
+    for item in base._split_top_level(inner):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        if "=" in candidate:
+            candidate = candidate.split("=", 1)[0].strip()
+            dynamic = True
+        if _JS_IDENTIFIER.fullmatch(candidate):
+            safe = base._safe_name(candidate)
+            if safe and not safe.startswith("<") and safe not in names:
+                names.append(safe)
+        else:
+            dynamic = True
+    return names[:20], dynamic
 
 
 def _param_structure(expr: str | None) -> dict[str, object]:
@@ -147,6 +241,15 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
             "param_names_dynamic": False,
             "param_name_refs": [],
             "component_refs": [],
+            "render_length": None,
+            "render_selector_kind": None,
+            "render_reserved": None,
+            "render_char_classes": [],
+            "render_safe_fragments": [],
+            "render_css_id_refs": [],
+            "params_source": None,
+            "assign_param_names": [],
+            "assign_params_dynamic": False,
         }
     )
     if body is None:
@@ -160,6 +263,14 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
     f_expr = by_key.get("f")
     u_expr = by_key.get("u") or by_key.get("update") or by_key.get("render")
     pa_expr = by_key.get("pa") or by_key.get("params")
+
+    assign_param_names, assign_params_dynamic = _assign_to_date_params(markup)
+    contract["assign_param_names"] = assign_param_names
+    contract["assign_params_dynamic"] = assign_params_dynamic
+    if pa_expr is not None:
+        contract["params_source"] = (
+            "arguments" if pa_expr.strip() == "arguments" else "other"
+        )
 
     if f_expr is not None:
         contract["f_present"] = True
@@ -183,6 +294,7 @@ def assign_to_date_detail_contract(markup: str) -> dict[str, object]:
         contract["render_safe"] = safe
         contract["render"] = safe_value if safe else None
         contract["render_refs"] = refs if safe else _literal_component_refs(u_expr)
+        contract.update(_render_structure(literal))
     elif u_expr is not None:
         contract["render_safe"] = False
 
@@ -221,12 +333,18 @@ class AssignToDateDetailDiagnosticSessionProxy(InlineDateHandlerDiagnosticSessio
             "source_present=%s source_kind=%s source=%s source_dynamic=%s source_refs=%s "
             "f_present=%s f_kind=%s f=%s f_dynamic=%s f_refs=%s f_functions=%s f_role=%s "
             "render_present=%s render_kind=%s render=%s render_safe=%s render_dynamic=%s render_refs=%s render_functions=%s "
+            "render_length=%s render_selector_kind=%s render_reserved=%s render_char_classes=%s "
+            "render_safe_fragments=%s render_css_id_refs=%s "
             "params_present=%s params_kind=%s param_names=%s param_names_dynamic=%s param_name_refs=%s "
+            "params_source=%s assign_param_names=%s assign_params_dynamic=%s "
             "component_refs=%s execute_present=%s event_present=%s partial_event=%s called_by=%s submit=%s",
             _request_step(method, data), c["ajax"], c["ajax_type"], c["ajax_direct"], c["primefaces_keys"],
             c["source_present"], c["source_kind"], c["source"], c["source_dynamic"], c["source_refs"],
             c["f_present"], c["f_kind"], c["f"], c["f_dynamic"], c["f_refs"], c["f_functions"], c["f_role"],
             c["render_present"], c["render_kind"], c["render"], c["render_safe"], c["render_dynamic"], c["render_refs"], c["render_functions"],
+            c["render_length"], c["render_selector_kind"], c["render_reserved"], c["render_char_classes"],
+            c["render_safe_fragments"], c["render_css_id_refs"],
             c["params_present"], c["params_kind"], c["param_names"], c["param_names_dynamic"], c["param_name_refs"],
+            c["params_source"], c["assign_param_names"], c["assign_params_dynamic"],
             c["component_refs"], c["execute_present"], c["event_present"], c["partial_event"], c["called_by"], c["submit"],
         )

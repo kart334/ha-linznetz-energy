@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/primefaces-f-u-pa-0.1.19
+      - diagnostic/primefaces-render-pa-shape-0.1.20
 
 jobs:
   test:

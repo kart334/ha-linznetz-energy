@@ -34,11 +34,11 @@ _load("assign_to_date_diagnostics")
 diag = _load("assign_to_date_detail_diagnostics")
 
 
-def _contract(options: str, *, form: str = ""):
+def _contract(options: str, *, form: str = "", params: str = ""):
     markup = f"""
     {form}
     <input id="myForm1:calendarToRegion" onchange="assignToDate();" />
-    <script>function assignToDate() {{ PrimeFaces.ab({options}); }}</script>
+    <script>function assignToDate({params}) {{ PrimeFaces.ab({options}); }}</script>
     """
     return diag.assign_to_date_detail_contract(markup)
 
@@ -141,6 +141,47 @@ def test_case_sensitive_ids_remain_unchanged() -> None:
     assert c["source"] == "myform:j_idt1320"
     assert c["f"] == "myForm1"
     assert c["render"] == "myForm1:List"
+
+
+def test_unsafe_render_reports_only_structure_and_safe_fragments() -> None:
+    c = _contract(
+        "{s:'Src',f:'myForm1',u:'@(#myForm1:list > .private-widget)',pa:[]}"
+    )
+    assert c["render_safe"] is False
+    assert c["render"] is None
+    assert c["render_selector_kind"] == "primefaces_search"
+    assert c["render_safe_fragments"] == ["myForm1:list"]
+    assert c["render_css_id_refs"] == ["myForm1:list"]
+    assert "hash" in c["render_char_classes"]
+    assert "parentheses" in c["render_char_classes"]
+    assert "@(#myForm1:list > .private-widget)" not in repr(c)
+
+
+def test_reserved_render_keyword_is_exposed_from_finite_safe_set() -> None:
+    c = _contract("{s:'Src',f:'myForm1',u:'@none',pa:[]}")
+    assert c["render_selector_kind"] == "reserved_keyword"
+    assert c["render_reserved"] == "@none"
+
+
+def test_arguments_source_reports_assign_to_date_parameter_names() -> None:
+    c = _contract(
+        "{s:'Src',f:'myForm1',u:'myForm1:list',pa:arguments}",
+        params="fromDate, toDate",
+    )
+    assert c["params_source"] == "arguments"
+    assert c["assign_param_names"] == ["fromDate", "toDate"]
+    assert c["assign_params_dynamic"] is False
+    assert c["param_names"] == []
+    assert c["param_names_dynamic"] is True
+
+
+def test_defaulted_function_parameter_marks_signature_dynamic() -> None:
+    c = _contract(
+        "{s:'Src',f:'myForm1',u:'myForm1:list',pa:arguments}",
+        params="fromDate = fallbackDate",
+    )
+    assert c["assign_param_names"] == ["fromDate"]
+    assert c["assign_params_dynamic"] is True
 
 
 def test_false_positive_text_stays_false_positive_free() -> None:

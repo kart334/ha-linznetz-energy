@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - diagnostic/primefaces-render-pa-shape-0.1.20
+      - diagnostic/primefaces-selector-arguments-call-0.1.21
 
 jobs:
   test:

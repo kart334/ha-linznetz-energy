@@ -1,4 +1,4 @@
-"""Regression tests for focused 0.1.19 assignToDate f/u/pa diagnostics."""
+"""Regression tests for focused assignToDate f/u/pa diagnostics."""
 
 import importlib.util
 from pathlib import Path
@@ -182,6 +182,51 @@ def test_defaulted_function_parameter_marks_signature_dynamic() -> None:
     )
     assert c["assign_param_names"] == ["fromDate"]
     assert c["assign_params_dynamic"] is True
+
+
+
+def test_attribute_suffix_render_reports_only_safe_selector_parts() -> None:
+    selector = "@([id$=calendarToRegion_input])"
+    c = _contract(
+        "{s:'Src',f:'myForm1',u:'" + selector + "',pa:arguments[1]}"
+    )
+    assert c["render"] is None
+    assert c["render_selector_kind"] == "primefaces_attribute_search"
+    assert c["render_attr_name"] == "id"
+    assert c["render_attr_operator"] == "$="
+    assert c["render_attr_value"] == "calendarToRegion_input"
+    assert selector not in repr(c)
+
+
+def test_arguments_index_and_inline_call_arity_are_structural_only() -> None:
+    c = _contract(
+        "{s:'Src',f:'myForm1',u:'myForm1:list',pa:arguments[1]}"
+    )
+    assert c["params_arguments_mode"] == "indexed_arguments"
+    assert c["params_argument_indexes"] == [1]
+    assert c["params_expr_length"] == len("arguments[1]")
+    assert "whitespace" not in c["params_expr_char_classes"]
+    assert c["assign_call_arities"] == [0]
+    assert c["assign_call_arg_kinds"] == []
+    assert c["assign_call_param_names"] == []
+
+
+def test_inline_call_reports_argument_kinds_and_parameter_names_not_values() -> None:
+    markup = """
+    <input id="myForm1:calendarToRegion"
+           onchange="assignToDate({name:'safeName',value:'SECRET'})" />
+    <script>
+      function assignToDate() {
+        PrimeFaces.ab({s:'Src',f:'myForm1',u:'myForm1:list',pa:arguments});
+      }
+    </script>
+    """
+    c = diag.assign_to_date_detail_contract(markup)
+    assert c["params_arguments_mode"] == "bare_arguments"
+    assert c["assign_call_arities"] == [1]
+    assert c["assign_call_arg_kinds"] == ["object"]
+    assert c["assign_call_param_names"] == ["safeName"]
+    assert "SECRET" not in repr(c)
 
 
 def test_false_positive_text_stays_false_positive_free() -> None:

@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/to-date-viewstate-confirmation-0.1.25
+      - fix/to-date-empty-viewstate-0.1.26
 
 jobs:
   test:

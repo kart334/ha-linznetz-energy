@@ -139,12 +139,14 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         )
         to_result.raise_for_status()
         to_body = await to_result.text()
-        to_view_state_value = self._extract_partial_view_state(to_body)
-        if not to_view_state_value:
+        to_updates = self._parse_partial_updates(to_body)
+        if not any(_VIEW_STATE_RE.search(update_id) for update_id in to_updates):
             raise LinzNetzParseError(
-                "assignToDate-AJAX lieferte keinen bestätigten JSF ViewState"
+                "assignToDate-AJAX lieferte keinen JSF-ViewState-Update-Knoten"
             )
-        current_view_state = to_view_state_value
+        current_view_state = (
+            self._extract_partial_view_state(to_body) or view_state_value
+        )
         current_form = self._merge_partial_response_form(
             current_form, form_id, to_body
         )

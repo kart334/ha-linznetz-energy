@@ -133,7 +133,7 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     """
     to_partial = """
     <partial-response><changes>
-      <update id="jakarta.faces.ViewState"><![CDATA[state-2]]></update>
+      <update id="jakarta.faces.ViewState"><![CDATA[]]></update>
     </changes></partial-response>
     """
     session = _FakeSession([to_partial, partial])
@@ -184,7 +184,7 @@ async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     assert from_payload["jakarta.faces.behavior.event"] == "change"
     assert "jakarta.faces.source" not in from_payload
     assert "jakarta.faces.partial.event" not in from_payload
-    assert from_payload["jakarta.faces.ViewState"] == "state-2"
+    assert from_payload["jakarta.faces.ViewState"] == "state-1"
     assert from_payload["myForm1:calendarToRegion"] == "21.08.2026"
     assert from_payload["myForm1:calendarFromRegion"] == "21.08.2026"
     assert updated_form.find(id="myForm1:calendarFromRegion").get("value") == "21.08.2026"

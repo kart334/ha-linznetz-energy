@@ -185,7 +185,7 @@ async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
     assert "myForm1:calendarFromRegion" not in to_payload
     assert "myForm1:q:selectedClass" not in to_payload
     assert "myForm1:k:selectedClass" not in to_payload
-    assert "jakarta.faces.partial.execute" not in to_payload
+    assert to_payload["jakarta.faces.partial.execute"] == "@all"
     assert "jakarta.faces.behavior.event" not in to_payload
     assert "jakarta.faces.partial.event" not in to_payload
 

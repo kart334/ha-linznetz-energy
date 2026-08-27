@@ -21,7 +21,7 @@ _COMPONENT_FRAGMENT = re.compile(r"[A-Za-z0-9_.\-$]+:[A-Za-z0-9_:@.\-$]+")
 _CSS_ID_REF = re.compile(r"#([A-Za-z0-9_:@.\-$]+)")
 _JS_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _ATTR_SEARCH = re.compile(
-    r"^@\(\[\s*([A-Za-z_$][A-Za-z0-9_$-]*)\s*(\^=|\$=|\*=|~=|\|=|=)\s*"
+    r"^@\(\[\s*([A-Za-z_$][A-Za-z0-9_-]*)\s*(\^=|\$=|\*=|~=|\|=|=)\s*"
     r"([A-Za-z0-9_:@.\-$]+)\s*\]\)$"
 )
 _ARGUMENT_INDEX = re.compile(r"\barguments\s*\[\s*(\d{1,3})\s*\]")

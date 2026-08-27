@@ -199,6 +199,7 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
             {
                 "jakarta.faces.partial.ajax": "true",
                 "jakarta.faces.source": to_source,
+                to_source: to_source,
                 "jakarta.faces.partial.render": to_render,
                 "assignToDate": day_text,
                 to_form_id: to_form_id,

@@ -205,6 +205,7 @@ def test_arguments_index_and_inline_call_arity_are_structural_only() -> None:
     assert c["params_arguments_mode"] == "indexed_arguments"
     assert c["params_argument_indexes"] == [1]
     assert c["params_expr_length"] == len("arguments[1]")
+    assert "whitespace" not in c["params_expr_char_classes"]
     assert c["assign_call_arities"] == [0]
     assert c["assign_call_arg_kinds"] == []
     assert c["assign_call_param_names"] == []

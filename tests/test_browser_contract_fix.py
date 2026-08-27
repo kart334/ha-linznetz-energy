@@ -1,4 +1,4 @@
-"""Regression tests for the 0.1.15 browser-contract portal fix."""
+"""Regression tests for the browser-contract portal fixes."""
 
 from datetime import date, datetime
 import importlib.util
@@ -75,27 +75,47 @@ def _form() -> BeautifulSoup:
           <input id="myForm1:calendarFromRegion" name="myForm1:calendarFromRegion"
                  type="text" value="24.08.2026"
                  onchange="initCalendar();PrimeFaces.ab({p:'myForm1:calendarFromRegion',u:'myForm1',e:'change'});" />
-          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
-                 type="text" value="24.08.2026" onchange="assignToDate();" />
+          <span id="myForm1:panel_calendarToRegion">
+            <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
+                   type="text" value="24.08.2026"
+                   onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
+          </span>
           <input name="myForm1:q:selectedClass" value="ConsumQuarter" checked="checked" type="radio" />
           <input name="myForm1:k:selectedClass" value="KWH" checked="checked" type="radio" />
           <span id="myForm1:list"></span>
           <input id="myForm1:btnIdA1" type="button" value="Anzeigen" />
         </form>
+        <script>
+          function assignToDate() {
+            PrimeFaces.ab({s:'myForm1:j_idt1320',f:'myForm1',
+              u:'@([id$=panel_calendarToRegion])',pa:arguments[0]});
+          }
+        </script>
         """,
         "html.parser",
     )
 
 
 @pytest.mark.asyncio
-async def test_from_onchange_executes_confirmed_contract_and_no_to_ajax() -> None:
+async def test_confirmed_to_ajax_then_unchanged_from_onchange() -> None:
     partial = """
     <partial-response><changes>
+      <update id="myForm1:panel_calendarToRegion"><![CDATA[
+        <span id="myForm1:panel_calendarToRegion">
+          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
+                 type="text" value="21.08.2026"
+                 onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
+        </span>
+      ]]></update>
       <update id="myForm1"><![CDATA[
         <form id="myForm1">
           <input type="hidden" name="jakarta.faces.ViewState" value="state-2" />
           <input id="myForm1:calendarFromRegion" name="myForm1:calendarFromRegion" type="text" value="21.08.2026" onchange="PrimeFaces.ab({p:'myForm1:calendarFromRegion',u:'myForm1',e:'change'});" />
-          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion" type="text" value="21.08.2026" onchange="assignToDate();" />
+          <span id="myForm1:panel_calendarToRegion">
+            <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
+                   type="text" value="21.08.2026"
+                   onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
+          </span>
           <input name="myForm1:q:selectedClass" value="ConsumQuarter" checked="checked" type="radio" />
           <input name="myForm1:k:selectedClass" value="KWH" checked="checked" type="radio" />
           <span id="myForm1:list"></span>
@@ -129,17 +149,63 @@ async def test_from_onchange_executes_confirmed_contract_and_no_to_ajax() -> Non
 
     assert complete is True
     assert view_state == "state-2"
-    assert len(session.posts) == 1
-    payload = session.posts[0]["data"]
-    assert payload["jakarta.faces.partial.execute"] == "myForm1:calendarFromRegion"
-    assert payload["jakarta.faces.partial.render"] == "myForm1"
-    assert payload["jakarta.faces.behavior.event"] == "change"
-    assert "jakarta.faces.source" not in payload
-    assert "jakarta.faces.partial.event" not in payload
-    assert payload["myForm1:calendarToRegion"] == "21.08.2026"
-    assert payload["myForm1:calendarFromRegion"] == "21.08.2026"
+    assert len(session.posts) == 2
+    to_payload = session.posts[0]["data"]
+    assert to_payload["jakarta.faces.source"] == "myForm1:j_idt1320"
+    assert (
+        to_payload["jakarta.faces.partial.render"]
+        == "@([id$=panel_calendarToRegion])"
+    )
+    assert to_payload["assignToDate"] == "21.08.2026"
+    assert "jakarta.faces.partial.execute" not in to_payload
+    assert "jakarta.faces.behavior.event" not in to_payload
+    assert "jakarta.faces.partial.event" not in to_payload
+    assert to_payload["myForm1:calendarToRegion"] == "21.08.2026"
+    assert to_payload["myForm1:calendarFromRegion"] == "21.08.2026"
+
+    from_payload = session.posts[1]["data"]
+    assert from_payload["jakarta.faces.partial.execute"] == "myForm1:calendarFromRegion"
+    assert from_payload["jakarta.faces.partial.render"] == "myForm1"
+    assert from_payload["jakarta.faces.behavior.event"] == "change"
+    assert "jakarta.faces.source" not in from_payload
+    assert "jakarta.faces.partial.event" not in from_payload
+    assert from_payload["jakarta.faces.ViewState"] == "state-2"
+    assert from_payload["myForm1:calendarToRegion"] == "21.08.2026"
+    assert from_payload["myForm1:calendarFromRegion"] == "21.08.2026"
     assert updated_form.find(id="myForm1:calendarFromRegion").get("value") == "21.08.2026"
     assert updated_form.find(id="myForm1:calendarToRegion").get("value") == "21.08.2026"
+
+
+
+@pytest.mark.asyncio
+async def test_to_ajax_fails_closed_before_request_when_value_role_changes() -> None:
+    session = _FakeSession("<partial-response />")
+    client = fix.BrowserContractLinzNetzClient(session, "u", "p")
+    soup = _form()
+    script = soup.find("script")
+    assert script is not None
+    script.string = str(script.string).replace("value:this.value", "value:this")
+    form = soup.find("form")
+    assert form is not None
+    date_from = form.find(id="myForm1:calendarFromRegion")
+    date_to = form.find(id="myForm1:calendarToRegion")
+    assert date_from is not None and date_to is not None
+
+    with pytest.raises(api.LinzNetzParseError, match="bestätigten PrimeFaces-Contract"):
+        await client._async_select_day(
+            behavior_soups=[soup],
+            form=form,
+            form_id="myForm1",
+            date_from=date_from,
+            date_to=date_to,
+            quarter=api.ChoiceField("myForm1:q:selectedClass", "ConsumQuarter"),
+            kwh=api.ChoiceField("myForm1:k:selectedClass", "KWH"),
+            requested_day=date(2026, 8, 21),
+            view_state_name="jakarta.faces.ViewState",
+            view_state_value="state-1",
+        )
+
+    assert session.posts == []
 
 
 def test_display_payload_matches_confirmed_button_contract() -> None:

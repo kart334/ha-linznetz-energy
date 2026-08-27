@@ -126,13 +126,6 @@ async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
     """
     to_partial = """
     <partial-response><changes>
-      <update id="myForm1:panel_calendarToRegion"><![CDATA[
-        <span id="myForm1:panel_calendarToRegion">
-          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
-                 type="text" value="21.08.2026"
-                 onchange="assignToDate([{name:'assignToDate',value:this.value}]);" />
-        </span>
-      ]]></update>
       <update id="j_id1:jakarta.faces.ViewState:0"><![CDATA[]]></update>
     </changes></partial-response>
     """

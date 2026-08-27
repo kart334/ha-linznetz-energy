@@ -189,6 +189,13 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         # can legitimately leave To at its previous value until assignToDate runs.
         self._verify_rendered_day_if_present(current_form, _FROM_RE, requested_day)
 
+        # After the From AJAX completes, the browser user edits To. Reapply that
+        # local DOM change because the preceding myForm1 render replaced the input.
+        current_to = self._find_named_control(current_form, _TO_RE)
+        if current_to is None or not current_to.get("name"):
+            raise LinzNetzParseError("To-Datumsfeld nach From-AJAX nicht gefunden")
+        current_to["value"] = day_text
+
         # JSF's browser client propagates every partial ViewState update to all
         # forms on the page. Mirror that behavior before submitting the separate
         # assignToDate form; its original hidden value is stale after From AJAX.

@@ -281,7 +281,7 @@ def _arguments_structure(expr: str | None) -> dict[str, object]:
         ("comma", ","),
         ("spread", "..."),
         ("operators", "+-*/?:"),
-        ("whitespace", " \\t\\r\\n"),
+        ("whitespace", " \t\r\n"),
     ):
         if chars == "...":
             present = chars in stripped

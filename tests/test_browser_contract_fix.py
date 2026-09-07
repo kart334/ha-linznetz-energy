@@ -19,7 +19,9 @@ def _load(name: str):
     if package is None:
         package = types.ModuleType(PACKAGE_NAME)
         package.__path__ = [str(PACKAGE_PATH)]
-        sys.modules.setdefault("custom_components", types.ModuleType("custom_components"))
+        sys.modules.setdefault(
+            "custom_components", types.ModuleType("custom_components")
+        )
         sys.modules[PACKAGE_NAME] = package
     if f"{PACKAGE_NAME}.const" not in sys.modules:
         const_spec = importlib.util.spec_from_file_location(
@@ -102,6 +104,27 @@ def _form() -> BeautifulSoup:
     )
 
 
+def _direct_to_form() -> BeautifulSoup:
+    return BeautifulSoup(
+        """
+        <form id="myForm1">
+          <input type="hidden" name="jakarta.faces.ViewState" value="state-1" />
+          <input id="myForm1:calendarFromRegion" name="myForm1:calendarFromRegion"
+                 type="text" value="05.09.2026"
+                 onchange="PrimeFaces.ab({p:'myForm1:calendarFromRegion',u:'myForm1',e:'change'});" />
+          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion"
+                 type="text" value="05.09.2026"
+                 onchange="PrimeFaces.ab({p:'myForm1:calendarToRegion',e:'change'});" />
+          <input name="myForm1:q:selectedClass" value="ConsumQuarter" checked="checked" type="radio" />
+          <input name="myForm1:k:selectedClass" value="KWH" checked="checked" type="radio" />
+          <span id="myForm1:list"></span>
+          <input id="myForm1:btnIdA1" type="button" value="Anzeigen" />
+        </form>
+        """,
+        "html.parser",
+    )
+
+
 @pytest.mark.asyncio
 async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
     from_partial = """
@@ -168,8 +191,7 @@ async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
     assert to_payload["jakarta.faces.source"] == "myform:j_idt1320"
     assert to_payload["myform:j_idt1320"] == "myform:j_idt1320"
     assert (
-        to_payload["jakarta.faces.partial.render"]
-        == "@([id$=panel_calendarToRegion])"
+        to_payload["jakarta.faces.partial.render"] == "@([id$=panel_calendarToRegion])"
     )
     assert to_payload["assignToDate"] == "21.08.2026"
     assert to_payload["myform"] == "myform"
@@ -182,9 +204,68 @@ async def test_unchanged_from_onchange_then_confirmed_to_ajax() -> None:
     assert "jakarta.faces.behavior.event" not in to_payload
     assert "jakarta.faces.partial.event" not in to_payload
 
-    assert updated_form.find(id="myForm1:calendarFromRegion").get("value") == "21.08.2026"
+    assert (
+        updated_form.find(id="myForm1:calendarFromRegion").get("value") == "21.08.2026"
+    )
     assert updated_form.find(id="myForm1:calendarToRegion").get("value") == "21.08.2026"
 
+
+@pytest.mark.asyncio
+async def test_direct_to_change_contract_without_source_or_render() -> None:
+    from_partial = """
+    <partial-response><changes>
+      <update id="myForm1"><![CDATA[
+        <form id="myForm1">
+          <input type="hidden" name="jakarta.faces.ViewState" value="state-2" />
+          <input id="myForm1:calendarFromRegion" name="myForm1:calendarFromRegion" type="text" value="03.09.2026" onchange="PrimeFaces.ab({p:'myForm1:calendarFromRegion',u:'myForm1',e:'change'});" />
+          <input id="myForm1:calendarToRegion" name="myForm1:calendarToRegion" type="text" value="05.09.2026" onchange="PrimeFaces.ab({p:'myForm1:calendarToRegion',e:'change'});" />
+          <input name="myForm1:q:selectedClass" value="ConsumQuarter" checked="checked" type="radio" />
+          <input name="myForm1:k:selectedClass" value="KWH" checked="checked" type="radio" />
+          <span id="myForm1:list"></span>
+          <input id="myForm1:btnIdA1" type="button" value="Anzeigen" />
+        </form>
+      ]]></update>
+      <update id="jakarta.faces.ViewState"><![CDATA[state-2]]></update>
+    </changes></partial-response>
+    """
+    to_partial = """
+    <partial-response><changes>
+      <update id="jakarta.faces.ViewState"><![CDATA[state-3]]></update>
+    </changes></partial-response>
+    """
+    session = _FakeSession([from_partial, to_partial])
+    client = fix.BrowserContractLinzNetzClient(session, "u", "p")
+    soup = _direct_to_form()
+    form = soup.find("form")
+    assert form is not None
+    date_from = form.find(id="myForm1:calendarFromRegion")
+    date_to = form.find(id="myForm1:calendarToRegion")
+    assert date_from is not None and date_to is not None
+
+    view_state, updated_form, complete = await client._async_select_day(
+        behavior_soups=[soup],
+        form=form,
+        form_id="myForm1",
+        date_from=date_from,
+        date_to=date_to,
+        quarter=api.ChoiceField("myForm1:q:selectedClass", "ConsumQuarter"),
+        kwh=api.ChoiceField("myForm1:k:selectedClass", "KWH"),
+        requested_day=date(2026, 9, 3),
+        view_state_name="jakarta.faces.ViewState",
+        view_state_value="state-1",
+    )
+
+    assert complete is True
+    assert view_state == "state-3"
+    assert len(session.posts) == 2
+    to_payload = session.posts[1]["data"]
+    assert "jakarta.faces.source" not in to_payload
+    assert "jakarta.faces.partial.render" not in to_payload
+    assert to_payload["jakarta.faces.partial.execute"] == "myForm1:calendarToRegion"
+    assert to_payload["jakarta.faces.behavior.event"] == "change"
+    assert to_payload["myForm1:calendarFromRegion"] == "03.09.2026"
+    assert to_payload["myForm1:calendarToRegion"] == "03.09.2026"
+    assert updated_form.find(id="myForm1:calendarToRegion").get("value") == "03.09.2026"
 
 
 @pytest.mark.asyncio
@@ -263,7 +344,9 @@ def test_known_valid_page_still_parses_96_quarter_values() -> None:
             rows.append(
                 f"<tr><td>24.08.2026 {hour:02d}:{minute:02d}</td><td>0,080</td></tr>"
             )
-    readings = api.LinzNetzClient._parse_readings("<table>" + "".join(rows) + "</table>")
+    readings = api.LinzNetzClient._parse_readings(
+        "<table>" + "".join(rows) + "</table>"
+    )
     assert len(readings) == 96
     assert {item.start_local.date() for item in readings} == {date(2026, 8, 24)}
 

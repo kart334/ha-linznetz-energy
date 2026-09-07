@@ -4,6 +4,7 @@ This module keeps the existing parser/backfill/statistics behavior from api.py a
 only overrides the date-selection and final display request construction according
 to the browser contracts confirmed live in 0.1.14.
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -54,7 +55,9 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
         current_from = self._find_named_control(current_form, _FROM_RE)
         current_to = self._find_named_control(current_form, _TO_RE)
         if current_from is None or current_to is None:
-            raise LinzNetzParseError("Datumsfelder nach Viertelstunden-Auswahl nicht gefunden")
+            raise LinzNetzParseError(
+                "Datumsfelder nach Viertelstunden-Auswahl nicht gefunden"
+            )
         if not current_from.get("name") or not current_to.get("name"):
             raise LinzNetzParseError("Wirksame Datumsfeldnamen nicht gefunden")
 
@@ -78,51 +81,72 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
                 to_contract = candidate
                 to_form = candidate_form
                 break
+        direct_to_contract: dict[str, object] | None = None
         if to_contract is None or to_form is None:
-            raise LinzNetzParseError(
-                "assignToDate-PrimeFaces-Form-Contract nicht gefunden"
-            )
+            candidate = inline_handler_contract(current_to, "onchange")
+            to_name = str(current_to.get("name"))
+            if not (
+                candidate.get("primefaces_ajax") is True
+                and candidate.get("source") is None
+                and candidate.get("execute") == to_name
+                and candidate.get("render") is None
+                and str(candidate.get("event") or "").lower() == "change"
+                and candidate.get("related_controls") == ["calendarToRegion"]
+                and candidate.get("param_names") == []
+                and candidate.get("pre_ajax_assignments") == []
+                and candidate.get("function_calls") == []
+            ):
+                raise LinzNetzParseError(
+                    "To-Datumsfeld-PrimeFaces-Contract nicht gefunden"
+                )
+            direct_to_contract = candidate
 
-        to_form_id = str(to_contract.get("f"))
-        to_source = to_contract.get("source")
-        attr_name = to_contract.get("render_attr_name")
-        attr_operator = to_contract.get("render_attr_operator")
-        attr_value = to_contract.get("render_attr_value")
-        to_render = f"@([{attr_name}{attr_operator}{attr_value}])"
-        if not (
-            to_contract.get("ajax_type") == "PrimeFaces.ab"
-            and to_contract.get("ajax_direct") is True
-            and isinstance(to_source, str)
-            and to_source.startswith(f"{to_form_id}:")
-            and to_contract.get("f_role") == "form"
-            and to_contract.get("render_selector_kind") == "primefaces_attribute_search"
-            and attr_name == "id"
-            and attr_operator == "$="
-            and attr_value == "panel_calendarToRegion"
-            and len(to_render) == to_contract.get("render_length")
-            and to_contract.get("params_arguments_mode") == "indexed_arguments"
-            and to_contract.get("params_argument_indexes") == [0]
-            and to_contract.get("assign_call_arities") == [1]
-            and to_contract.get("assign_call_arg_kinds") == ["array"]
-            and to_contract.get("assign_call_param_names") == ["assignToDate"]
-            and to_contract.get("assign_call_param_value_roles")
-            == ["assignToDate:this_value"]
-            and to_contract.get("execute_present") is False
-            and to_contract.get("event_present") is False
-        ):
-            raise LinzNetzParseError(
-                "assignToDate entspricht nicht dem bestätigten PrimeFaces-Contract"
-            )
+        if direct_to_contract is None:
+            assert to_contract is not None and to_form is not None
 
-        to_view_state = to_form.find("input", attrs={"name": _VIEW_STATE_RE})
-        if to_view_state is None or not to_view_state.get("name"):
-            raise LinzNetzParseError(
-                "JSF ViewState im assignToDate-Formular nicht gefunden"
-            )
+            to_form_id = str(to_contract.get("f"))
+            to_source = to_contract.get("source")
+            attr_name = to_contract.get("render_attr_name")
+            attr_operator = to_contract.get("render_attr_operator")
+            attr_value = to_contract.get("render_attr_value")
+            to_render = f"@([{attr_name}{attr_operator}{attr_value}])"
+            if not (
+                to_contract.get("ajax_type") == "PrimeFaces.ab"
+                and to_contract.get("ajax_direct") is True
+                and isinstance(to_source, str)
+                and to_source.startswith(f"{to_form_id}:")
+                and to_contract.get("f_role") == "form"
+                and to_contract.get("render_selector_kind")
+                == "primefaces_attribute_search"
+                and attr_name == "id"
+                and attr_operator == "$="
+                and attr_value == "panel_calendarToRegion"
+                and len(to_render) == to_contract.get("render_length")
+                and to_contract.get("params_arguments_mode") == "indexed_arguments"
+                and to_contract.get("params_argument_indexes") == [0]
+                and to_contract.get("assign_call_arities") == [1]
+                and to_contract.get("assign_call_arg_kinds") == ["array"]
+                and to_contract.get("assign_call_param_names") == ["assignToDate"]
+                and to_contract.get("assign_call_param_value_roles")
+                == ["assignToDate:this_value"]
+                and to_contract.get("execute_present") is False
+                and to_contract.get("event_present") is False
+            ):
+                raise LinzNetzParseError(
+                    "assignToDate entspricht nicht dem bestätigten PrimeFaces-Contract"
+                )
+
+            to_view_state = to_form.find("input", attrs={"name": _VIEW_STATE_RE})
+            if to_view_state is None or not to_view_state.get("name"):
+                raise LinzNetzParseError(
+                    "JSF ViewState im assignToDate-Formular nicht gefunden"
+                )
 
         contract = inline_handler_contract(current_from, "onchange")
         if not contract["primefaces_ajax"]:
-            raise LinzNetzParseError("PrimeFaces-AJAX für From-Datumsfeld nicht gefunden")
+            raise LinzNetzParseError(
+                "PrimeFaces-AJAX für From-Datumsfeld nicht gefunden"
+            )
 
         execute = str(contract.get("execute") or "")
         render = str(contract.get("render") or "")
@@ -196,23 +220,36 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
             raise LinzNetzParseError("To-Datumsfeld nach From-AJAX nicht gefunden")
         current_to["value"] = day_text
 
-        # JSF's browser client propagates every partial ViewState update to all
-        # forms on the page. Mirror that behavior before submitting the separate
-        # assignToDate form; its original hidden value is stale after From AJAX.
-        to_view_state["value"] = current_view_state
-
-        to_payload = self._collect_form_payload(to_form)
-        to_payload.update(
-            {
-                "jakarta.faces.partial.ajax": "true",
-                "jakarta.faces.source": to_source,
-                to_source: to_source,
-                "jakarta.faces.partial.execute": "@all",
-                "jakarta.faces.partial.render": to_render,
-                "assignToDate": day_text,
-                to_form_id: to_form_id,
-            }
-        )
+        if direct_to_contract is not None:
+            to_payload = self._collect_form_payload(current_form)
+            to_payload.update(
+                {
+                    "jakarta.faces.partial.ajax": "true",
+                    "jakarta.faces.partial.execute": str(direct_to_contract["execute"]),
+                    "jakarta.faces.behavior.event": "change",
+                    form_id: form_id,
+                    quarter.name: quarter.value,
+                    kwh.name: kwh.value,
+                    view_state_name: current_view_state,
+                }
+            )
+        else:
+            # JSF's browser client propagates every partial ViewState update to all
+            # forms on the page. Mirror that behavior before submitting the separate
+            # assignToDate form; its original hidden value is stale after From AJAX.
+            to_view_state["value"] = current_view_state
+            to_payload = self._collect_form_payload(to_form)
+            to_payload.update(
+                {
+                    "jakarta.faces.partial.ajax": "true",
+                    "jakarta.faces.source": to_source,
+                    to_source: to_source,
+                    "jakarta.faces.partial.execute": "@all",
+                    "jakarta.faces.partial.render": to_render,
+                    "assignToDate": day_text,
+                    to_form_id: to_form_id,
+                }
+            )
         to_result = await self._session.post(
             PORTAL_URL,
             data=to_payload,
@@ -230,14 +267,12 @@ class BrowserContractLinzNetzClient(LinzNetzClient):
             if _TO_VIEW_STATE_RE.search(update_id):
                 to_view_state_value = update_value
                 break
-        if to_view_state_value is None:
+        if to_view_state_value is None and direct_to_contract is None:
             raise LinzNetzParseError(
                 "assignToDate-AJAX lieferte keinen JSF-ViewState-Update-Knoten"
             )
         current_view_state = to_view_state_value or current_view_state
-        current_form = self._merge_partial_response_form(
-            current_form, form_id, to_body
-        )
+        current_form = self._merge_partial_response_form(current_form, form_id, to_body)
 
         # Only after both browser events may the range be considered selected.
         self._verify_rendered_day_if_present(current_form, _FROM_RE, requested_day)
